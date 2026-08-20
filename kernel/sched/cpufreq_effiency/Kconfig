@@ -1,0 +1,19 @@
+config OPLUS_FEATURE_SUGOV_TL
+	bool "use target loads in schedutil governor"
+	depends on CPU_FREQ_GOV_SCHEDUTIL
+	default y
+	help
+	  Add target_loads sysfs attr in cpufreq schedutil governor.
+
+config OPLUS_FEATURE_SUGOV_POWER_EFFIENCY
+	tristate "power domain effiency"
+	default y
+	help
+	     Select Left or right frequence point as target frequence base on powerdomain and currenct frequence value
+	     
+config CPU_EFF_EXTEND_MODE
+	tristate "power domain effiency extend"
+	default y
+	help
+	     extended limitation
+

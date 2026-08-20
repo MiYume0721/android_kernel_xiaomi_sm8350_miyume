@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+TECHPACK?=y
+
+ifeq ($(CONFIG_MACH_XIAOMI_STAR), y)
+obj-y += camera_star/
+header-y += camera_star/include/uapi/
+endif
+
+ifeq ($(CONFIG_MACH_XIAOMI_VENUS), y)
+obj-y += camera_venus/
+header-y += camera_venus/include/uapi/
+endif
+
+ifeq ($(CONFIG_MACH_XIAOMI_HAYDN), y)
+obj-y += camera_venus/
+header-y += camera_venus/include/uapi/
+endif
+
+obj-y += audio/ bootinfo/ dataipa/ datarmnet/ datarmnet-ext/ display/ stub/ video/
+header-y += audio/include/uapi/ display/include/uapi stub/ video/
