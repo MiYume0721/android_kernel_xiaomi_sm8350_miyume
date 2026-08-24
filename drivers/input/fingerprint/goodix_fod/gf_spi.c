@@ -73,12 +73,14 @@
 #define N_SPI_MINORS			32	/* ... up to 256 */
 
 
-#define GF_VDD_SUPPLY		"l11c_vdd"
-#define GF_VDD_LOAD_UA		200000
+#define GF_VDD_SUPPLY			"l11c_vdd"
+#define GF_VDD_ACTIVE_LOAD_UA		200000
+#define GF_VDD_IDLE_LOAD_UA		0
 
 static int gf_regulator_init(struct gf_dev *gf_dev)
 {
 	struct device *dev = &gf_dev->spi->dev;
+	int disable_rc;
 	int rc;
 
 	mutex_init(&gf_dev->power_lock);
@@ -93,80 +95,100 @@ static int gf_regulator_init(struct gf_dev *gf_dev)
 		return rc;
 	}
 
+	/*
+	 * Keep the rail enabled for the lifetime of the driver.  Goodix keeps
+	 * calibration state across idle/DOZE, so removing the rail here breaks
+	 * the next capture.  The load vote, not the enable state, is used to
+	 * move the RPMh regulator out of HPM while the sensor is idle.
+	 */
+	/* Start with an explicit HPM vote so enable applies a known mode. */
+	rc = regulator_set_load(gf_dev->vdd, GF_VDD_ACTIVE_LOAD_UA);
+	if (rc)
+		return rc;
+
+	rc = regulator_enable(gf_dev->vdd);
+	if (rc) {
+		regulator_set_load(gf_dev->vdd, GF_VDD_IDLE_LOAD_UA);
+		return rc;
+	}
+
+	gf_dev->power_enabled = true;
+	/* A non-zero to zero transition makes RPMh DRMS select LPM now. */
+	rc = regulator_set_load(gf_dev->vdd, GF_VDD_IDLE_LOAD_UA);
+	if (rc) {
+		disable_rc = regulator_disable(gf_dev->vdd);
+		if (!disable_rc)
+			gf_dev->power_enabled = false;
+		regulator_set_load(gf_dev->vdd, GF_VDD_IDLE_LOAD_UA);
+		return rc;
+	}
+
 	return 0;
 }
 
-static int gf_regulator_enable(struct gf_dev *gf_dev)
+static int gf_regulator_set_active(struct gf_dev *gf_dev, bool active)
 {
+	int load_uA = active ? GF_VDD_ACTIVE_LOAD_UA : GF_VDD_IDLE_LOAD_UA;
 	int rc;
 
 	mutex_lock(&gf_dev->power_lock);
-	if (gf_dev->power_enabled) {
-		rc = 0;
-		goto out;
-	}
-
-	if (!gf_dev->vdd) {
+	if (!gf_dev->vdd || !gf_dev->power_enabled) {
 		rc = -ENODEV;
 		goto out;
 	}
 
-	rc = regulator_set_load(gf_dev->vdd, GF_VDD_LOAD_UA);
-	if (rc)
-		goto out;
-
-	rc = regulator_enable(gf_dev->vdd);
-	if (rc) {
-		regulator_set_load(gf_dev->vdd, 0);
-		goto out;
-	}
-
-	gf_dev->power_enabled = true;
+	rc = regulator_set_load(gf_dev->vdd, load_uA);
 out:
 	mutex_unlock(&gf_dev->power_lock);
 	return rc;
 }
 
-static int gf_regulator_disable(struct gf_dev *gf_dev)
+static int gf_regulator_exit(struct gf_dev *gf_dev)
 {
-	int load_rc;
+	int load_rc = 0;
 	int rc = 0;
 
 	mutex_lock(&gf_dev->power_lock);
-	if (!gf_dev->vdd || !gf_dev->power_enabled)
+	if (!gf_dev->vdd)
 		goto out;
 
-	rc = regulator_disable(gf_dev->vdd);
-	if (rc)
-		goto out;
-
-	gf_dev->power_enabled = false;
-	load_rc = regulator_set_load(gf_dev->vdd, 0);
+	if (gf_dev->power_enabled) {
+		rc = regulator_disable(gf_dev->vdd);
+		if (!rc)
+			gf_dev->power_enabled = false;
+	}
+	load_rc = regulator_set_load(gf_dev->vdd, GF_VDD_IDLE_LOAD_UA);
 	if (load_rc)
 		dev_warn(&gf_dev->spi->dev,
 			 "failed to clear %s load vote: %d\n",
 			 GF_VDD_SUPPLY, load_rc);
 out:
 	mutex_unlock(&gf_dev->power_lock);
-	return rc;
+	return rc ? rc : load_rc;
 }
 
 static int gf_sensor_power_on(struct gf_dev *gf_dev)
 {
 	int rc;
 
-	rc = gf_regulator_enable(gf_dev);
+	rc = gf_regulator_set_active(gf_dev, true);
 	if (rc)
 		return rc;
 
 	rc = gf_power_on(gf_dev);
 	if (rc)
-		gf_regulator_disable(gf_dev);
+		gf_regulator_set_active(gf_dev, false);
 
 	return rc;
 }
 
-static int gf_sensor_power_off(struct gf_dev *gf_dev)
+static int gf_sensor_set_idle(struct gf_dev *gf_dev)
+{
+	/* Keep L11C enabled so DOZE FOD retains calibration and wake ability. */
+	return gf_regulator_set_active(gf_dev, false);
+}
+
+static int gf_sensor_shutdown(struct gf_dev *gf_dev)
 {
 	int regulator_rc;
 	int rc;
@@ -175,7 +197,7 @@ static int gf_sensor_power_off(struct gf_dev *gf_dev)
 		gpio_set_value(gf_dev->reset_gpio, 0);
 
 	rc = gf_power_off(gf_dev);
-	regulator_rc = gf_regulator_disable(gf_dev);
+	regulator_rc = gf_regulator_exit(gf_dev);
 
 	return regulator_rc ? regulator_rc : rc;
 }
@@ -480,6 +502,7 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	gf_nav_event_t nav_event = GF_NAV_NONE;
 #endif
 	int retval = 0;
+	int power_retval;
 	u8 netlink_route = NETLINK_TEST;
 	struct gf_ioc_chip_info info;
 
@@ -577,15 +600,35 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 #endif
 
 	case GF_IOC_ENABLE_SPI_CLK:
+		/*
+		 * The ColorOS HAL brackets every TEE transaction with the SPI
+		 * clock ioctls, even when AP clock control is not compiled in.
+		 * Use that real transaction boundary for the regulator HPM vote.
+		 */
+		retval = gf_regulator_set_active(gf_dev, true);
+		if (retval)
+			break;
 #ifdef AP_CONTROL_CLK
-		gfspi_ioctl_clk_enable(gf_dev);
+		retval = gfspi_ioctl_clk_enable(gf_dev);
+		if (retval) {
+			power_retval = gf_sensor_set_idle(gf_dev);
+			if (power_retval)
+				dev_warn(&gf_dev->spi->dev,
+					 "failed to restore idle load: %d\n",
+					 power_retval);
+		}
 #endif
 		break;
 
 	case GF_IOC_DISABLE_SPI_CLK:
 #ifdef AP_CONTROL_CLK
-		gfspi_ioctl_clk_disable(gf_dev);
+		retval = gfspi_ioctl_clk_disable(gf_dev);
 #endif
+		power_retval = gf_sensor_set_idle(gf_dev);
+		if (power_retval)
+			dev_warn(&gf_dev->spi->dev,
+				 "failed to clear transaction load: %d\n",
+				 power_retval);
 		break;
 
 	case GF_IOC_ENABLE_POWER:
@@ -599,13 +642,14 @@ static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case GF_IOC_DISABLE_POWER:
 		pr_debug("%s GF_IOC_DISABLE_POWER\n", __func__);
 
-		retval = gf_sensor_power_off(gf_dev);
+		retval = gf_sensor_set_idle(gf_dev);
 		if (!retval)
 			gf_dev->device_available = 0;
 		break;
 
 	case GF_IOC_ENTER_SLEEP_MODE:
 		pr_debug("%s GF_IOC_ENTER_SLEEP_MODE\n", __func__);
+		retval = gf_sensor_set_idle(gf_dev);
 		break;
 
 	case GF_IOC_GET_FW_INFO:
@@ -774,7 +818,17 @@ static int gf_open(struct inode *inode, struct file *filp)
 					  "gf", gf_dev);
 
 		if (!rc) {
-			enable_irq_wake(gf_dev->irq);
+			gf_dev->irq_requested = true;
+			if (!gf_dev->irq_wake_enabled) {
+				rc = enable_irq_wake(gf_dev->irq);
+				if (!rc) {
+					gf_dev->irq_wake_enabled = true;
+				} else {
+					dev_warn(&gf_dev->spi->dev,
+						 "failed to enable IRQ wake: %d\n",
+						 rc);
+				}
+			}
 			gf_dev->irq_enabled = 1;
 			gf_disable_irq(gf_dev);
 		} else {
@@ -816,12 +870,9 @@ static int gf_release(struct inode *inode, struct file *filp)
 {
 	struct gf_dev *gf_dev;
 	int power_rc;
+	int wake_rc;
 	int status = 0;
 	pr_debug("%s\n", __func__);
-	if (mutex_is_locked(&device_list_lock)) {
-		pr_info("%s unlock\n", __func__);
-		mutex_unlock(&device_list_lock);
-	}
 	status = mutex_lock_interruptible(&device_list_lock);
 	if (status)
 		return status;
@@ -842,14 +893,28 @@ static int gf_release(struct inode *inode, struct file *filp)
 	if (gf_dev->users == 1) {
 		pr_debug("disble_irq. irq = %d\n", gf_dev->irq);
 		gf_disable_irq(gf_dev);
-		/*power off the sensor */
-		power_rc = gf_sensor_power_off(gf_dev);
+		if (gf_dev->irq_wake_enabled) {
+			wake_rc = disable_irq_wake(gf_dev->irq);
+			if (wake_rc) {
+				dev_warn(&gf_dev->spi->dev,
+					 "failed to disable IRQ wake: %d\n",
+					 wake_rc);
+			} else {
+				gf_dev->irq_wake_enabled = false;
+			}
+		}
+		/* Drop the HPM vote, but preserve power and calibration. */
+		power_rc = gf_sensor_set_idle(gf_dev);
 		if (power_rc)
 			dev_err(&gf_dev->spi->dev,
-				"failed to power off sensor on release: %d\n",
+				"failed to set sensor idle on release: %d\n",
 				power_rc);
 		gf_dev->device_available = 0;
-		free_irq(gf_dev->irq, gf_dev);
+		if (gf_dev->irq_requested) {
+			free_irq(gf_dev->irq, gf_dev);
+			gf_dev->irq_requested = false;
+			gf_dev->irq_enabled = 0;
+		}
 		gpio_free(gf_dev->irq_gpio);
 		gpio_free(gf_dev->reset_gpio);
 #ifdef GF_PW_CTL
@@ -973,6 +1038,9 @@ static int gf_probe(struct platform_device *pdev)
 	gf_dev->device_available = 0;
 	gf_dev->fb_black = 0;
 	gf_dev->wait_finger_down = false;
+	gf_dev->irq_enabled = 0;
+	gf_dev->irq_requested = false;
+	gf_dev->irq_wake_enabled = false;
 #ifndef GOODIX_DRM_INTERFACE_WA
 	INIT_WORK(&gf_dev->work, notification_work);
 #endif
@@ -983,7 +1051,7 @@ static int gf_probe(struct platform_device *pdev)
 
 	status = gf_regulator_init(gf_dev);
 	if (status)
-		goto error_hw;
+		goto error_regulator;
 
 	/* If we can allocate a minor number, hook up this device.
 	 * Reusing minors is fine so long as udev or mdev is working.
@@ -1001,7 +1069,7 @@ static int gf_probe(struct platform_device *pdev)
 		dev_dbg(&gf_dev->spi->dev, "no minor number available!\n");
 		status = -ENODEV;
 		mutex_unlock(&device_list_lock);
-		goto error_hw;
+		goto error_regulator;
 	}
 
 	if (status == 0) {
@@ -1012,6 +1080,8 @@ static int gf_probe(struct platform_device *pdev)
 	}
 
 	mutex_unlock(&device_list_lock);
+	if (status)
+		goto error_regulator;
 
 	if (status == 0) {
 		/*input device subsystem */
@@ -1059,8 +1129,10 @@ static int gf_probe(struct platform_device *pdev)
 	/*fp_wakelock = wakeup_source_create("fp_wakelock");*/
 	fp_wakelock = wakeup_source_register(&(gf_dev->spi->dev),
 					     "fp_wakelock");
-	if(fp_wakelock==NULL)
+	if (fp_wakelock == NULL) {
+		status = -ENOMEM;
 		goto error_wakelock;
+	}
 	pr_debug("version V%d.%d.%02d\n", VER_MAJOR, VER_MINOR, PATCH_LEVEL);
 	return status;
 
@@ -1074,11 +1146,16 @@ gfspi_probe_clk_enable_failed:
 	gfspi_ioctl_clk_uninit(gf_dev);
 gfspi_probe_clk_init_failed:
 #endif
-	input_unregister_device(gf_dev->input);
+	if (gf_dev->input != NULL) {
+		input_unregister_device(gf_dev->input);
+		gf_dev->input = NULL;
+	}
+	goto error_dev;
 error_input:
 
 	if (gf_dev->input != NULL) {
 		input_free_device(gf_dev->input);
+		gf_dev->input = NULL;
 	}
 
 error_dev:
@@ -1092,6 +1169,8 @@ error_dev:
 		mutex_unlock(&device_list_lock);
 	}
 
+error_regulator:
+	status = gf_regulator_exit(gf_dev) ?: status;
 error_hw:
 	gf_cleanup(gf_dev);
 	gf_dev->device_available = 0;
@@ -1106,24 +1185,38 @@ static int gf_remove(struct platform_device *pdev)
 {
 	struct gf_dev *gf_dev = &gf;
 	int power_rc;
+	int wake_rc;
 
-	power_rc = gf_sensor_power_off(gf_dev);
+	/* make sure ops on existing fds can abort cleanly */
+	if (gf_dev->irq_requested && gf_dev->irq_enabled)
+		gf_disable_irq(gf_dev);
+	if (gf_dev->irq_wake_enabled) {
+		wake_rc = disable_irq_wake(gf_dev->irq);
+		if (wake_rc) {
+			dev_warn(&gf_dev->spi->dev,
+				 "failed to disable IRQ wake on remove: %d\n",
+				 wake_rc);
+		} else {
+			gf_dev->irq_wake_enabled = false;
+		}
+	}
+	if (gf_dev->irq_requested) {
+		free_irq(gf_dev->irq, gf_dev);
+		gf_dev->irq_requested = false;
+		gf_dev->irq_enabled = 0;
+	}
+	power_rc = gf_sensor_shutdown(gf_dev);
 	if (power_rc)
 		dev_err(&gf_dev->spi->dev,
 			"failed to power off sensor on remove: %d\n", power_rc);
 	/*wakeup_source_destroy(fp_wakelock);*/
 	wakeup_source_unregister(fp_wakelock);
 	fp_wakelock = NULL;
-	/* make sure ops on existing fds can abort cleanly */
-	if (gf_dev->irq) {
-		free_irq(gf_dev->irq, gf_dev);
-	}
 
 	if (gf_dev->input != NULL) {
 		input_unregister_device(gf_dev->input);
+		gf_dev->input = NULL;
 	}
-
-	input_free_device(gf_dev->input);
 	/* prevent new opens */
 	mutex_lock(&device_list_lock);
 	list_del(&gf_dev->device_entry);
@@ -1192,12 +1285,13 @@ static int __init gf_init(void)
 		class_destroy(gf_class);
 		unregister_chrdev(SPIDEV_MAJOR, gf_driver.driver.name);
 		pr_warn("Failed to register SPI driver.\n");
+		return status;
 	}
 #ifdef GF_NETLINK_ENABLE
 	netlink_init();
 #endif
 	pr_debug("goodix status = 0x%x\n", status);
-	return 0;
+	return status;
 }
 
 module_init(gf_init);

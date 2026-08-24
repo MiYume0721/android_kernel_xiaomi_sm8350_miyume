@@ -2575,7 +2575,6 @@ QDF_STATUS hif_post_recv_buffers_for_pipe(struct HIF_CE_pipe_info *pipe_info)
 
 	ce_hdl = pipe_info->ce_hdl;
 	ce_id = ((struct CE_state *)ce_hdl)->id;
-	struct CE_state *CE_state = (struct CE_state *)ce_hdl;
 
 	qdf_spin_lock_bh(&pipe_info->recv_bufs_needed_lock);
 	while (atomic_read(&pipe_info->recv_bufs_needed) > 0) {
@@ -2594,8 +2593,7 @@ QDF_STATUS hif_post_recv_buffers_for_pipe(struct HIF_CE_pipe_info *pipe_info)
 					&pipe_info->nbuf_alloc_err_count,
 					 HIF_RX_NBUF_ALLOC_FAILURE,
 					"HIF_RX_NBUF_ALLOC_FAILURE");
-			qdf_sched_work(scn->qdf_dev, &CE_state->oom_allocation_work);
-			return QDF_STATUS_SUCCESS;
+			return QDF_STATUS_E_NOMEM;
 		}
 
 		hif_record_ce_desc_event(scn, ce_id,
@@ -2615,8 +2613,7 @@ QDF_STATUS hif_post_recv_buffers_for_pipe(struct HIF_CE_pipe_info *pipe_info)
 					 HIF_RX_NBUF_MAP_FAILURE,
 					"HIF_RX_NBUF_MAP_FAILURE");
 			qdf_nbuf_free(nbuf);
-			qdf_sched_work(scn->qdf_dev, &CE_state->oom_allocation_work);
-			return QDF_STATUS_SUCCESS;
+			return status;
 		}
 
 		CE_data = qdf_nbuf_get_frag_paddr(nbuf, 0);
@@ -2635,8 +2632,7 @@ QDF_STATUS hif_post_recv_buffers_for_pipe(struct HIF_CE_pipe_info *pipe_info)
 			qdf_nbuf_unmap_single(scn->qdf_dev, nbuf,
 						QDF_DMA_FROM_DEVICE);
 			qdf_nbuf_free(nbuf);
-			qdf_sched_work(scn->qdf_dev, &CE_state->oom_allocation_work);
-			return QDF_STATUS_SUCCESS;
+			return status;
 		}
 
 		qdf_spin_lock_bh(&pipe_info->recv_bufs_needed_lock);
