@@ -21,7 +21,7 @@
 #include "iostat.h"
 #include <trace/events/f2fs.h>
 
-#define DEFAULT_CHECKPOINT_IOPRIO (IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 3))
+#define DEFAULT_CHECKPOINT_IOPRIO (IOPRIO_PRIO_VALUE(IOPRIO_CLASS_RT, 3))
 
 static struct kmem_cache *ino_entry_slab;
 struct kmem_cache *f2fs_inode_entry_slab;
@@ -1932,6 +1932,8 @@ int f2fs_start_ckpt_thread(struct f2fs_sb_info *sbi)
 	}
 
 	set_task_ioprio(cprc->f2fs_issue_ckpt, cprc->ckpt_thread_ioprio);
+	set_user_nice(cprc->f2fs_issue_ckpt,
+			PRIO_TO_NICE(sbi->critical_task_priority));
 
 	return 0;
 }

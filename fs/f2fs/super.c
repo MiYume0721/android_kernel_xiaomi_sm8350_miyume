@@ -162,6 +162,7 @@ enum {
 	Opt_discard_unit,
 	Opt_memory_mode,
 	Opt_age_extent_cache,
+	Opt_noage_extent_cache,
 	Opt_err,
 };
 
@@ -241,6 +242,7 @@ static match_table_t f2fs_tokens = {
 	{Opt_discard_unit, "discard_unit=%s"},
 	{Opt_memory_mode, "memory=%s"},
 	{Opt_age_extent_cache, "age_extent_cache"},
+	{Opt_noage_extent_cache, "noage_extent_cache"},
 	{Opt_err, NULL},
 };
 
@@ -1255,6 +1257,9 @@ static int parse_options(struct super_block *sb, char *options, bool is_remount)
 		case Opt_age_extent_cache:
 			set_opt(sbi, AGE_EXTENT_CACHE);
 			break;
+		case Opt_noage_extent_cache:
+			clear_opt(sbi, AGE_EXTENT_CACHE);
+			break;
 		default:
 			f2fs_err(sbi, "Unrecognized mount option \"%s\" or missing value",
 				 p);
@@ -1982,6 +1987,8 @@ static int f2fs_show_options(struct seq_file *seq, struct dentry *root)
 		seq_puts(seq, ",noextent_cache");
 	if (test_opt(sbi, AGE_EXTENT_CACHE))
 		seq_puts(seq, ",age_extent_cache");
+	else
+		seq_puts(seq, ",noage_extent_cache");
 	if (test_opt(sbi, DATA_FLUSH))
 		seq_puts(seq, ",data_flush");
 
@@ -2103,6 +2110,8 @@ static void default_options(struct f2fs_sb_info *sbi)
 		set_opt(sbi, FLUSH_MERGE);
 	set_opt(sbi, ATGC);
 #ifdef CONFIG_MACH_XIAOMI
+	/* Use block-age history for hot/warm/cold data separation. */
+	set_opt(sbi, AGE_EXTENT_CACHE);
 	set_opt(sbi, GC_MERGE);
 #endif
 	if (f2fs_hw_support_discard(sbi) || f2fs_hw_should_discard(sbi))
@@ -3684,6 +3693,7 @@ static void init_sb_info(struct f2fs_sb_info *sbi)
 	sbi->max_fragment_hole = DEF_FRAGMENT_SIZE;
 	spin_lock_init(&sbi->gc_remaining_trials_lock);
 	atomic64_set(&sbi->current_atomic_write, 0);
+	sbi->critical_task_priority = F2FS_CRITICAL_TASK_PRIORITY;
 
 	sbi->dir_level = DEF_DIR_LEVEL;
 	sbi->interval_time[CP_TIME] = DEF_CP_INTERVAL;

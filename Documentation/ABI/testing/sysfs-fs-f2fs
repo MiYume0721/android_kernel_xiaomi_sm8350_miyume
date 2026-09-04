@@ -716,3 +716,11 @@ What:		/sys/fs/f2fs/<disk>/last_age_weight
 Date:		January 2023
 Contact:	"Ping Xiong" <xiongping1@xiaomi.com>
 Description:	When DATA SEPARATION is on, it controls the weight of last data block age.
+
+What:		/sys/fs/f2fs/<disk>/critical_task_priority
+Date:		February 2026
+Contact:	"Chao Yu" <chao@kernel.org>
+Description:	Tune the priority of critical F2FS tasks, including the
+		f2fs_ckpt and f2fs_gc threads. Writing requires CAP_SYS_NICE.
+		The accepted internal-priority range is [100, 139], and the
+		default value is 120 (nice 0).

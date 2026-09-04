@@ -123,6 +123,9 @@ typedef u32 nid_t;
 
 #define COMPRESS_EXT_NUM		16
 
+/* Android Common Kernel 6.6: priority used by critical F2FS workers. */
+#define F2FS_CRITICAL_TASK_PRIORITY	NICE_TO_PRIO(0)
+
 /*
  * An implementation of an rwsem that is explicitly unfair to readers. This
  * prevents priority inversion when a low-priority reader acquires the read lock
@@ -1849,6 +1852,9 @@ struct f2fs_sb_info {
 	s64 peak_atomic_write;
 	u64 committed_atomic_block;
 	u64 revoked_atomic_block;
+
+	/* Priority for critical tasks, e.g. f2fs_ckpt and f2fs_gc. */
+	long critical_task_priority;
 
 #ifdef CONFIG_F2FS_FS_COMPRESSION
 	struct kmem_cache *page_array_slab;	/* page array entry */
@@ -4180,7 +4186,7 @@ void f2fs_leave_shrinker(struct f2fs_sb_info *sbi);
 /*
  * extent_cache.c
  */
-bool sanity_check_extent_cache(struct inode *inode);
+bool sanity_check_extent_cache(struct inode *inode, struct page *ipage);
 struct rb_entry *f2fs_lookup_rb_tree(struct rb_root_cached *root,
 				struct rb_entry *cached_re, unsigned int ofs);
 struct rb_node **f2fs_lookup_rb_tree_ext(struct f2fs_sb_info *sbi,

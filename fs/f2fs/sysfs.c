@@ -360,6 +360,10 @@ static ssize_t f2fs_sbi_show(struct f2fs_attr *a,
 			sbi->gc_reclaimed_segs[sbi->gc_segment_mode]);
 	}
 
+	if (!strcmp(a->attr.name, "critical_task_priority"))
+		return snprintf(buf, PAGE_SIZE, "%ld\n",
+				sbi->critical_task_priority);
+
 	if (!strcmp(a->attr.name, "current_atomic_write")) {
 		s64 current_write = atomic64_read(&sbi->current_atomic_write);
 
@@ -715,6 +719,22 @@ out:
 		return count;
 	}
 
+	if (!strcmp(a->attr.name, "critical_task_priority")) {
+		if (t < NICE_TO_PRIO(MIN_NICE) ||
+				t > NICE_TO_PRIO(MAX_NICE))
+			return -EINVAL;
+		if (!capable(CAP_SYS_NICE))
+			return -EPERM;
+		sbi->critical_task_priority = t;
+		if (sbi->cprc_info.f2fs_issue_ckpt)
+			set_user_nice(sbi->cprc_info.f2fs_issue_ckpt,
+				PRIO_TO_NICE(sbi->critical_task_priority));
+		if (sbi->gc_thread && sbi->gc_thread->f2fs_gc_task)
+			set_user_nice(sbi->gc_thread->f2fs_gc_task,
+				PRIO_TO_NICE(sbi->critical_task_priority));
+		return count;
+	}
+
 	if (!strcmp(a->attr.name, "hot_data_age_threshold")) {
 		if (t == 0 || t >= sbi->warm_data_age_threshold)
 			return -EINVAL;
@@ -934,6 +954,8 @@ F2FS_RW_ATTR(F2FS_SBI, f2fs_sb_info, data_io_flag, data_io_flag);
 F2FS_RW_ATTR(F2FS_SBI, f2fs_sb_info, node_io_flag, node_io_flag);
 F2FS_RW_ATTR(F2FS_SBI, f2fs_sb_info, gc_remaining_trials, gc_remaining_trials);
 F2FS_RW_ATTR(CPRC_INFO, ckpt_req_control, ckpt_thread_ioprio, ckpt_thread_ioprio);
+F2FS_RW_ATTR(F2FS_SBI, f2fs_sb_info, critical_task_priority,
+						critical_task_priority);
 F2FS_GENERAL_RO_ATTR(dirty_segments);
 F2FS_GENERAL_RO_ATTR(free_segments);
 F2FS_GENERAL_RO_ATTR(ovp_segments);
@@ -1076,6 +1098,7 @@ static struct attribute *f2fs_attrs[] = {
 	ATTR_LIST(node_io_flag),
 	ATTR_LIST(gc_remaining_trials),
 	ATTR_LIST(ckpt_thread_ioprio),
+	ATTR_LIST(critical_task_priority),
 	ATTR_LIST(dirty_segments),
 	ATTR_LIST(free_segments),
 	ATTR_LIST(ovp_segments),
