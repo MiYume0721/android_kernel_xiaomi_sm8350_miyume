@@ -511,6 +511,11 @@ enum binder_driver_return_protocol {
 	 * detection threshold.  No parameters.
 	 */
 
+	BR_TRANSACTION_PENDING_FROZEN = _IO('r', 20),
+	/*
+	 * The target of the last async transaction is frozen.  No parameters.
+	 */
+
 	BR_FROZEN_BINDER = _IOR('r', 21, struct binder_frozen_state_info),
 	/*
 	 * The cookie and whether the referenced process transitioned into a
