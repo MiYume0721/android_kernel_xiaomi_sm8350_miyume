@@ -1249,6 +1249,12 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 	return retval;
 }
 
+SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
+		unsigned int, flags)
+{
+	return __close_range(fd, max_fd, flags);
+}
+
 /*
  * This routine simulates a hangup on the tty, to arrange that users
  * are given clean terminals at login time.

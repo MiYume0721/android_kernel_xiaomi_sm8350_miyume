@@ -46,6 +46,8 @@
 #include <linux/nmi.h>
 #include <linux/show_mem_notifier.h>
 #include <linux/memory_hotplug.h>
+#include <linux/pid.h>
+#include <linux/syscalls.h>
 
 #include <asm/tlb.h>
 #include "internal.h"
@@ -1246,6 +1248,74 @@ void pagefault_out_of_memory(void)
 
 	if (__ratelimit(&pfoom_rs))
 		pr_warn("Huh VM_FAULT_OOM leaked out to the #PF handler. Retrying PF\n");
+}
+
+SYSCALL_DEFINE2(process_mrelease, int, pidfd, unsigned int, flags)
+{
+#ifdef CONFIG_MMU
+	struct mm_struct *mm = NULL;
+	struct task_struct *task, *p;
+	struct pid *pid;
+	bool reap = false;
+	long ret = 0;
+
+	if (flags)
+		return -EINVAL;
+
+	pid = pidfd_get_pid(pidfd);
+	if (IS_ERR(pid))
+		return PTR_ERR(pid);
+
+	task = get_pid_task(pid, PIDTYPE_TGID);
+	if (!task) {
+		ret = -ESRCH;
+		goto put_pid;
+	}
+
+	p = find_lock_task_mm(task);
+	if (!p) {
+		ret = -ESRCH;
+		goto put_task;
+	}
+
+	mm = p->mm;
+	mmgrab(mm);
+
+	/* Synchronize with exit_mmap() and make the mm eligible for reaping. */
+	set_bit(MMF_OOM_VICTIM, &mm->flags);
+
+	if (task_will_free_mem(p))
+		reap = true;
+	else if (!test_bit(MMF_OOM_SKIP, &mm->flags))
+		ret = -EINVAL;
+	task_unlock(p);
+
+	if (!reap)
+		goto drop_mm;
+
+	if (mmap_read_lock_killable(mm)) {
+		ret = -EINTR;
+		goto drop_mm;
+	}
+
+	/*
+	 * MMF_OOM_SKIP is serialized by mmap_lock.  If the regular OOM
+	 * reaper has already handled this mm, process_mrelease() succeeds.
+	 */
+	if (!test_bit(MMF_OOM_SKIP, &mm->flags) && !__oom_reap_task_mm(mm))
+		ret = -EAGAIN;
+
+	mmap_read_unlock(mm);
+drop_mm:
+	mmdrop(mm);
+put_task:
+	put_task_struct(task);
+put_pid:
+	put_pid(pid);
+	return ret;
+#else
+	return -ENOSYS;
+#endif /* CONFIG_MMU */
 }
 
 void add_to_oom_reaper(struct task_struct *p)

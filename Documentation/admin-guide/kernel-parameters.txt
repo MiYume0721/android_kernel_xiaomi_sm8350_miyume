@@ -3845,6 +3845,13 @@
 	printk.time=	Show timing data prefixed to each printk message line
 			Format: <bool>  (1/Y/y=enable, 0/N/n=disable)
 
+	process_madvise_abi=	[KNL]
+			Format: {upstream | legacy}
+			Select the process_madvise syscall 440 calling convention.
+			The default "upstream" ABI takes a pidfd and five
+			arguments. "legacy" enables this tree's former
+			which/pid-or-pidfd six-argument vendor convention.
+
 	proc_mem.force_override= [KNL]
 			Format: {always | ptrace | never}
 			Traditionally /proc/pid/mem allows memory permissions to be

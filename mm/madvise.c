@@ -31,6 +31,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/sched/mm.h>
 #include <linux/uio.h>
+#include <linux/init.h>
 
 #include <asm/tlb.h>
 
@@ -1258,9 +1259,9 @@ static int do_process_madvise(struct task_struct *target_task,
 	return ret;
 }
 
-SYSCALL_DEFINE6(process_madvise, int, which, pid_t, upid,
-		const struct iovec __user *, vec, unsigned long, vlen,
-		int, behavior, unsigned long, flags)
+static long process_madvise_legacy(int which, pid_t upid,
+		const struct iovec __user *vec, unsigned long vlen,
+		int behavior, unsigned long flags)
 {
 	ssize_t ret;
 	struct pid *pid;
@@ -1326,4 +1327,108 @@ release_task:
 put_pid:
 	put_pid(pid);
 	return ret;
+}
+
+static long process_madvise_upstream(int pidfd,
+		const struct iovec __user *vec, size_t vlen,
+		int behavior, unsigned int flags)
+{
+	ssize_t ret;
+	struct pid *pid;
+	struct task_struct *task;
+	struct mm_struct *mm;
+	struct iovec iovstack[UIO_FASTIOV];
+	struct iovec *iov = iovstack;
+	struct iov_iter iter;
+
+	if (flags != 0)
+		return -EINVAL;
+
+	ret = import_iovec(READ, vec, vlen, ARRAY_SIZE(iovstack), &iov, &iter);
+	if (ret < 0)
+		return ret;
+
+	pid = pidfd_get_pid(pidfd);
+	if (IS_ERR(pid)) {
+		ret = PTR_ERR(pid);
+		goto free_iov;
+	}
+
+	task = get_pid_task(pid, PIDTYPE_PID);
+	if (!task) {
+		ret = -ESRCH;
+		goto put_pid;
+	}
+
+	if (!process_madvise_behavior_valid(behavior)) {
+		ret = -EINVAL;
+		goto release_task;
+	}
+
+	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
+	if (IS_ERR_OR_NULL(mm)) {
+		ret = IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
+		goto release_task;
+	}
+
+	if (!capable(CAP_SYS_NICE)) {
+		ret = -EPERM;
+		goto release_mm;
+	}
+
+	{
+		size_t total_len = iov_iter_count(&iter);
+
+		ret = do_process_madvise(task, mm, &iter, behavior);
+		if (ret >= 0)
+			ret = total_len - iov_iter_count(&iter);
+	}
+
+release_mm:
+	mmput(mm);
+release_task:
+	put_task_struct(task);
+put_pid:
+	put_pid(pid);
+free_iov:
+	kfree(iov);
+	return ret;
+}
+
+/*
+ * This tree previously exposed a non-upstream six-argument process_madvise()
+ * at syscall 436.  Android userspace expects close_range() at 436 and the
+ * pidfd-based five-argument process_madvise() at 440.  Keep the old calling
+ * convention available at 440 only as an explicit boot-time compatibility
+ * option for vendor userspace that still needs it.
+ */
+static bool process_madvise_legacy_abi;
+
+static int __init process_madvise_abi_setup(char *str)
+{
+	if (!strcmp(str, "legacy"))
+		process_madvise_legacy_abi = true;
+	else if (!strcmp(str, "upstream"))
+		process_madvise_legacy_abi = false;
+	else
+		return 0;
+
+	pr_info("process_madvise: using %s syscall ABI\n",
+		process_madvise_legacy_abi ? "legacy" : "upstream");
+	return 1;
+}
+__setup("process_madvise_abi=", process_madvise_abi_setup);
+
+SYSCALL_DEFINE6(process_madvise, unsigned long, arg0, unsigned long, arg1,
+		unsigned long, arg2, unsigned long, arg3,
+		unsigned long, arg4, unsigned long, arg5)
+{
+	if (unlikely(process_madvise_legacy_abi))
+		return process_madvise_legacy((int)arg0, (pid_t)arg1,
+				(const struct iovec __user *)arg2, arg3,
+				(int)arg4, arg5);
+
+	return process_madvise_upstream((int)arg0,
+			(const struct iovec __user *)arg1, (size_t)arg2,
+			(int)arg3, (unsigned int)arg4);
 }

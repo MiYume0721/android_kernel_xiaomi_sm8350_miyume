@@ -15,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
+#include <linux/close_range.h>
 #include <linux/bitops.h>
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
@@ -655,6 +656,74 @@ out_unlock:
 	return -EBADF;
 }
 EXPORT_SYMBOL(__close_fd); /* for ksys_close() */
+
+static void close_range_set_cloexec(struct files_struct *files,
+				    unsigned int fd, unsigned int max_fd)
+{
+	struct fdtable *fdt;
+
+	spin_lock(&files->file_lock);
+	fdt = files_fdtable(files);
+	if (fd < fdt->max_fds) {
+		max_fd = min(max_fd, fdt->max_fds - 1);
+		bitmap_set(fdt->close_on_exec, fd, max_fd - fd + 1);
+	}
+	spin_unlock(&files->file_lock);
+}
+
+static void close_range_close(struct files_struct *files, unsigned int fd,
+			      unsigned int max_fd)
+{
+	unsigned int last;
+
+	spin_lock(&files->file_lock);
+	last = files_fdtable(files)->max_fds - 1;
+	spin_unlock(&files->file_lock);
+	max_fd = min(max_fd, last);
+
+	for (; fd <= max_fd; fd++) {
+		__close_fd(files, fd);
+		cond_resched();
+	}
+}
+
+/**
+ * __close_range() - close or mark close-on-exec a range of descriptors
+ * @fd: first descriptor in the range
+ * @max_fd: last descriptor in the range
+ * @flags: CLOSE_RANGE_UNSHARE and/or CLOSE_RANGE_CLOEXEC
+ *
+ * The 5.4 files code has no partial dup_fd() helper.  Its existing full-table
+ * unshare helper preserves the userspace ABI with only a small extra copy for
+ * the uncommon CLOSE_RANGE_UNSHARE case.
+ */
+int __close_range(unsigned int fd, unsigned int max_fd, unsigned int flags)
+{
+	struct files_struct *displaced = NULL;
+	struct files_struct *files;
+	int ret;
+
+	if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))
+		return -EINVAL;
+	if (fd > max_fd)
+		return -EINVAL;
+
+	if (flags & CLOSE_RANGE_UNSHARE) {
+		ret = unshare_files(&displaced);
+		if (ret)
+			return ret;
+	}
+
+	files = current->files;
+	if (flags & CLOSE_RANGE_CLOEXEC)
+		close_range_set_cloexec(files, fd, max_fd);
+	else
+		close_range_close(files, fd, max_fd);
+
+	if (displaced)
+		put_files_struct(displaced);
+	return 0;
+}
 
 /*
  * variant of __close_fd that gets a ref on the file for later fput

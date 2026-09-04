@@ -875,9 +875,12 @@ asmlinkage long sys_munlockall(void);
 asmlinkage long sys_mincore(unsigned long start, size_t len,
 				unsigned char __user * vec);
 asmlinkage long sys_madvise(unsigned long start, size_t len, int behavior);
-asmlinkage long sys_process_madvise(int which, pid_t upid,
-		const struct iovec __user *vec, unsigned long vlen,
-		int behavior, unsigned long flags);
+asmlinkage long sys_close_range(unsigned int fd, unsigned int max_fd,
+		unsigned int flags);
+asmlinkage long sys_process_madvise(unsigned long arg0, unsigned long arg1,
+		unsigned long arg2, unsigned long arg3,
+		unsigned long arg4, unsigned long arg5);
+asmlinkage long sys_process_mrelease(int pidfd, unsigned int flags);
 asmlinkage long sys_remap_file_pages(unsigned long start, unsigned long size,
 			unsigned long prot, unsigned long pgoff,
 			unsigned long flags);
