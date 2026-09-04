@@ -56,7 +56,7 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
 /* Order against which the node fragmentation score is calculated. */
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE)
 #define COMPACTION_HPAGE_ORDER	HPAGE_PMD_ORDER
-#elif defined(CONFIG_HUGETLBFS)
+#elif defined(HUGETLB_PAGE_ORDER)
 #define COMPACTION_HPAGE_ORDER	HUGETLB_PAGE_ORDER
 #else
 #define COMPACTION_HPAGE_ORDER	(PMD_SHIFT - PAGE_SHIFT)
@@ -1856,13 +1856,18 @@ static bool kswapd_is_running(pg_data_t *pgdat)
 		READ_ONCE(pgdat->kswapd->state) == TASK_RUNNING;
 }
 
-/* A zone score is weighted by its contribution to node memory. */
+/* A zone's raw external fragmentation score is in the range [0, 100]. */
 static unsigned int fragmentation_score_zone(struct zone *zone)
+{
+	return extfrag_for_order(zone, COMPACTION_HPAGE_ORDER);
+}
+
+/* Weight each zone by its contribution to total node memory. */
+static unsigned int fragmentation_score_zone_weighted(struct zone *zone)
 {
 	unsigned long score;
 
-	score = zone->present_pages *
-			extfrag_for_order(zone, COMPACTION_HPAGE_ORDER);
+	score = zone->present_pages * fragmentation_score_zone(zone);
 	return div64_ul(score, zone->zone_pgdat->node_present_pages + 1);
 }
 
@@ -1875,7 +1880,7 @@ static unsigned int fragmentation_score_node(pg_data_t *pgdat)
 		struct zone *zone = &pgdat->node_zones[zoneid];
 
 		if (populated_zone(zone))
-			score += fragmentation_score_zone(zone);
+			score += fragmentation_score_zone_weighted(zone);
 	}
 	return score;
 }
