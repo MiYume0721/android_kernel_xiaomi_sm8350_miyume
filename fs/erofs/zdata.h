@@ -63,8 +63,16 @@ struct z_erofs_pcluster {
 	/* A: lower limit of decompressed length and if full length or not */
 	unsigned int length;
 
-	/* I: physical cluster size in pages */
-	unsigned short pclusterpages;
+	/* I: page offset of inline compressed data */
+	unsigned short pageofs_in;
+
+	union {
+		/* I: physical cluster size in pages */
+		unsigned short pclusterpages;
+
+		/* I: tailpacking inline compressed size */
+		unsigned short tailpacking_size;
+	};
 
 	/* I: compression algorithm format */
 	unsigned char algorithmformat;
@@ -94,6 +102,16 @@ struct z_erofs_decompressqueue {
 		struct work_struct work;
 	} u;
 };
+
+static inline bool z_erofs_is_inline_pcluster(struct z_erofs_pcluster *pcl)
+{
+	return !pcl->obj.index;
+}
+
+static inline unsigned int z_erofs_pclusterpages(struct z_erofs_pcluster *pcl)
+{
+	return z_erofs_is_inline_pcluster(pcl) ? 1 : pcl->pclusterpages;
+}
 
 #define MNGD_MAPPING(sbi)	((sbi)->managed_cache->i_mapping)
 static inline bool erofs_page_is_managed(const struct erofs_sb_info *sbi,
@@ -187,4 +205,3 @@ static inline void z_erofs_onlinepage_endio(struct page *page)
 #define Z_EROFS_VMAP_GLOBAL_PAGES	2048
 
 #endif
-

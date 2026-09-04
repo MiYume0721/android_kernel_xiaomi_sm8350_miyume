@@ -308,6 +308,7 @@ static int erofs_read_superblock(struct super_block *sb)
 #endif
 	sbi->islotbits = ilog2(sizeof(struct erofs_inode_compact));
 	sbi->root_nid = le16_to_cpu(dsb->root_nid);
+	sbi->packed_nid = le64_to_cpu(dsb->packed_nid);
 	sbi->inos = le64_to_cpu(dsb->inos);
 
 	sbi->build_time = le64_to_cpu(dsb->build_time);
@@ -585,6 +586,21 @@ static int erofs_fill_super(struct super_block *sb, void *data, int silent)
 	if (!sb->s_root)
 		return -ENOMEM;
 
+#ifdef CONFIG_EROFS_FS_ZIP
+	if (erofs_sb_has_fragments(sbi)) {
+		if (!sbi->packed_nid) {
+			erofs_err(sb, "fragment feature without a packed inode");
+			return -EFSCORRUPTED;
+		}
+		sbi->packed_inode = erofs_iget(sb, sbi->packed_nid, false);
+		if (IS_ERR(sbi->packed_inode)) {
+			err = PTR_ERR(sbi->packed_inode);
+			sbi->packed_inode = NULL;
+			return err;
+		}
+	}
+#endif
+
 	erofs_shrinker_register(sb);
 	/* sb->s_umount is already locked, SB_ACTIVE and SB_BORN are not set */
 	err = erofs_init_managed_cache(sb);
@@ -630,6 +646,8 @@ static void erofs_put_super(struct super_block *sb)
 
 	erofs_shrinker_unregister(sb);
 #ifdef CONFIG_EROFS_FS_ZIP
+	iput(sbi->packed_inode);
+	sbi->packed_inode = NULL;
 	iput(sbi->managed_cache);
 	sbi->managed_cache = NULL;
 #endif
@@ -785,4 +803,3 @@ module_exit(erofs_module_exit);
 MODULE_DESCRIPTION("Enhanced ROM File System");
 MODULE_AUTHOR("Gao Xiang, Chao Yu, Miao Xie, CONSUMER BG, HUAWEI Inc.");
 MODULE_LICENSE("GPL");
-

@@ -20,10 +20,15 @@
 #define EROFS_FEATURE_INCOMPAT_ZERO_PADDING	0x00000001
 #define EROFS_FEATURE_INCOMPAT_COMPR_CFGS	0x00000002
 #define EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER	0x00000002
+#define EROFS_FEATURE_INCOMPAT_ZTAILPACKING	0x00000010
+#define EROFS_FEATURE_INCOMPAT_FRAGMENTS		0x00000020
+#define EROFS_FEATURE_INCOMPAT_DEDUPE		0x00000020
 #define EROFS_ALL_FEATURE_INCOMPAT		\
 	(EROFS_FEATURE_INCOMPAT_ZERO_PADDING | \
 	 EROFS_FEATURE_INCOMPAT_COMPR_CFGS | \
-	 EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER)
+	 EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER | \
+	 EROFS_FEATURE_INCOMPAT_ZTAILPACKING | \
+	 EROFS_FEATURE_INCOMPAT_FRAGMENTS)
 
 #define EROFS_SB_EXTSLOT_SIZE	16
 
@@ -52,7 +57,9 @@ struct erofs_super_block {
 		/* customized sliding window size instead of 64k by default */
 		__le16 lz4_max_distance;
 	} __packed u1;
-	__u8 reserved2[42];
+	__u8 reserved2[10];
+	__le64 packed_nid;	/* nid of the special packed inode */
+	__u8 reserved3[24];
 };
 
 /*
@@ -228,13 +235,27 @@ struct z_erofs_lz4_cfgs {
  *                                  (4B) + 2B + (4B) if compacted 2B is on.
  * bit 1 : HEAD1 big pcluster (0 - off; 1 - on)
  * bit 2 : HEAD2 big pcluster (0 - off; 1 - on)
+ * bit 3 : tailpacking inline pcluster (0 - off; 1 - on)
+ * bit 5 : tailpacking fragment pcluster (0 - off; 1 - on)
  */
 #define Z_EROFS_ADVISE_COMPACTED_2B		0x0001
 #define Z_EROFS_ADVISE_BIG_PCLUSTER_1		0x0002
 #define Z_EROFS_ADVISE_BIG_PCLUSTER_2		0x0004
+#define Z_EROFS_ADVISE_INLINE_PCLUSTER		0x0008
+#define Z_EROFS_ADVISE_FRAGMENT_PCLUSTER	0x0020
+
+#define Z_EROFS_FRAGMENT_INODE_BIT		7
 
 struct z_erofs_map_header {
-	__le32	h_reserved1;
+	union {
+		/* fragment data offset in the packed inode */
+		__le32	h_fragmentoff;
+		struct {
+			__le16	h_reserved1;
+			/* indicates the encoded size of tailpacking data */
+			__le16	h_idata_size;
+		};
+	};
 	__le16	h_advise;
 	/*
 	 * bit 0-3 : algorithm type of head 1 (logical cluster type 01);
@@ -335,6 +356,7 @@ struct erofs_dirent {
 static inline void erofs_check_ondisk_layout_definitions(void)
 {
 	BUILD_BUG_ON(sizeof(struct erofs_super_block) != 128);
+	BUILD_BUG_ON(offsetof(struct erofs_super_block, packed_nid) != 96);
 	BUILD_BUG_ON(sizeof(struct erofs_inode_compact) != 32);
 	BUILD_BUG_ON(sizeof(struct erofs_inode_extended) != 64);
 	BUILD_BUG_ON(sizeof(struct erofs_xattr_ibody_header) != 12);
@@ -348,4 +370,3 @@ static inline void erofs_check_ondisk_layout_definitions(void)
 }
 
 #endif
-
