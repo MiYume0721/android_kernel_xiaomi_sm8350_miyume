@@ -27,6 +27,7 @@ Currently, these files are in /proc/sys/vm:
 - admin_reserve_kbytes
 - block_dump
 - compact_memory
+- compaction_proactiveness
 - compact_unevictable_allowed
 - dirty_background_bytes
 - dirty_background_ratio
@@ -122,6 +123,17 @@ Available only when CONFIG_COMPACTION is set. When 1 is written to the file,
 all zones are compacted such that free memory is available in contiguous
 blocks where possible. This can be important for example in the allocation of
 huge pages although processes will also directly compact memory as required.
+
+
+compaction_proactiveness
+========================
+
+This tunable accepts values from 0 to 100 and controls how aggressively
+kcompactd maintains low external fragmentation in the background. The
+default is 20; setting it to 0 disables proactive compaction and its
+periodic wakeups. Ineffective compaction attempts are automatically
+backed off to limit CPU and power consumption. Very high values can
+increase background migration work and should be used cautiously.
 
 
 compact_unevictable_allowed

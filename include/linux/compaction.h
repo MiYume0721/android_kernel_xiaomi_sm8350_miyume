@@ -85,8 +85,12 @@ static inline unsigned long compact_gap(unsigned int order)
 
 #ifdef CONFIG_COMPACTION
 extern int sysctl_compact_memory;
+extern int sysctl_compaction_proactiveness;
 extern int sysctl_compaction_handler(struct ctl_table *table, int write,
 			void __user *buffer, size_t *length, loff_t *ppos);
+extern int compaction_proactiveness_sysctl_handler(
+		struct ctl_table *table, int write, void __user *buffer,
+		size_t *length, loff_t *ppos);
 #ifdef CONFIG_MACH_XIAOMI
 extern unsigned long sysctl_reclaim_pages;
 extern int sysctl_reclaim_pages_handler(struct ctl_table *table, int write,
@@ -95,6 +99,7 @@ extern int sysctl_reclaim_pages_handler(struct ctl_table *table, int write,
 extern int sysctl_extfrag_threshold;
 extern int sysctl_compact_unevictable_allowed;
 
+extern int extfrag_for_order(struct zone *zone, unsigned int order);
 extern int fragmentation_index(struct zone *zone, unsigned int order);
 extern enum compact_result try_to_compact_pages(gfp_t gfp_mask,
 		unsigned int order, unsigned int alloc_flags,
