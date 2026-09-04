@@ -108,7 +108,7 @@ free_pagearray:
 			break;
 	}
 	pcb_nrpages = nrpages;
-	put_pages_list(&pagepool);
+	erofs_release_pages(&pagepool);
 out:
 	mutex_unlock(&pcb_resize_mutex);
 	return ret;

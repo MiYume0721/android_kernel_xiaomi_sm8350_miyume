@@ -5,20 +5,77 @@
  * Created by Gao Xiang <gaoxiang25@huawei.com>
  */
 #include "internal.h"
+#include <linux/module.h>
 #include <linux/pagevec.h>
 
-struct page *erofs_allocpage(struct list_head *pool, gfp_t gfp)
+/*
+ * Keep a small, on-demand reserve of short-lived decompression pages.
+ * This is adapted from the EROFS reserved buffer pool in Linux 6.6.
+ */
+static LIST_HEAD(erofs_rsv_pages);
+static DEFINE_SPINLOCK(erofs_rsv_lock);
+static unsigned int erofs_rsv_count;
+static unsigned int erofs_rsv_nrpages = 64;
+module_param_named(reserved_pages, erofs_rsv_nrpages, uint, 0444);
+MODULE_PARM_DESC(reserved_pages,
+		 "Number of on-demand EROFS temporary pages to keep globally");
+
+struct page *__erofs_allocpage(struct list_head *pool, gfp_t gfp,
+				   bool try_reserve)
 {
-	struct page *page;
+	struct page *page = NULL;
 
 	if (!list_empty(pool)) {
 		page = lru_to_page(pool);
-		DBG_BUGON(page_ref_count(page) != 1);
 		list_del(&page->lru);
-	} else {
-		page = alloc_page(gfp);
+	} else if (try_reserve) {
+		spin_lock(&erofs_rsv_lock);
+		if (!list_empty(&erofs_rsv_pages)) {
+			page = lru_to_page(&erofs_rsv_pages);
+			list_del(&page->lru);
+			--erofs_rsv_count;
+		}
+		spin_unlock(&erofs_rsv_lock);
 	}
+	if (!page)
+		page = alloc_page(gfp);
+	DBG_BUGON(page && page_ref_count(page) != 1);
 	return page;
+}
+
+void erofs_release_pages(struct list_head *pool)
+{
+	while (!list_empty(pool)) {
+		struct page *page = lru_to_page(pool);
+		bool reserved = false;
+
+		list_del(&page->lru);
+		DBG_BUGON(page_ref_count(page) != 1);
+		DBG_BUGON(page->mapping);
+		if (erofs_rsv_nrpages &&
+		    READ_ONCE(erofs_rsv_count) < erofs_rsv_nrpages) {
+			spin_lock(&erofs_rsv_lock);
+			if (erofs_rsv_count < erofs_rsv_nrpages) {
+				list_add(&page->lru, &erofs_rsv_pages);
+				++erofs_rsv_count;
+				reserved = true;
+			}
+			spin_unlock(&erofs_rsv_lock);
+		}
+		if (!reserved)
+			put_page(page);
+	}
+}
+
+void erofs_release_reserved_pages(void)
+{
+	LIST_HEAD(pages);
+
+	spin_lock(&erofs_rsv_lock);
+	list_splice_init(&erofs_rsv_pages, &pages);
+	erofs_rsv_count = 0;
+	spin_unlock(&erofs_rsv_lock);
+	put_pages_list(&pages);
 }
 
 #ifdef CONFIG_EROFS_FS_ZIP

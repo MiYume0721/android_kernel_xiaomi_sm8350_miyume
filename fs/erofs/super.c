@@ -688,6 +688,7 @@ static void __exit erofs_module_exit(void)
 {
 	unregister_filesystem(&erofs_fs_type);
 	z_erofs_exit_zip_subsystem();
+	erofs_release_reserved_pages();
 	erofs_exit_shrinker();
 
 	/* Ensure all RCU free inodes are safe before cache is destroyed. */

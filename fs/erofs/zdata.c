@@ -741,7 +741,8 @@ retry:
 	/* should allocate an additional staging page for pagevec */
 	if (err == -EAGAIN) {
 		struct page *const newpage =
-				alloc_page(GFP_NOFS | __GFP_NOFAIL);
+				__erofs_allocpage(pagepool,
+					GFP_NOFS | __GFP_NOFAIL, true);
 
 		set_page_private(newpage, Z_EROFS_SHORTLIVED_PAGE);
 		err = z_erofs_attach_page(clt, newpage,
@@ -1073,7 +1074,7 @@ static void z_erofs_decompressqueue_work(struct work_struct *work)
 	DBG_BUGON(bgq->head == Z_EROFS_PCLUSTER_TAIL_CLOSED);
 	z_erofs_decompress_queue(bgq, &pagepool);
 
-	put_pages_list(&pagepool);
+	erofs_release_pages(&pagepool);
 	kvfree(bgq);
 }
 
@@ -1179,7 +1180,7 @@ repeat:
 	unlock_page(page);
 	put_page(page);
 out_allocpage:
-	page = erofs_allocpage(pagepool, gfp | __GFP_NOFAIL);
+	page = __erofs_allocpage(pagepool, gfp | __GFP_NOFAIL, true);
 	if (oldpage != cmpxchg(&pcl->compressed_pages[nr], oldpage, page)) {
 		list_add(&page->lru, pagepool);
 		cond_resched();
@@ -1406,7 +1407,7 @@ static int z_erofs_readpage(struct file *file, struct page *page)
 		put_page(f.map.mpage);
 
 	/* clean up the remaining free pages */
-	put_pages_list(&pagepool);
+	erofs_release_pages(&pagepool);
 	return err;
 }
 
@@ -1473,7 +1474,7 @@ static int z_erofs_readpages(struct file *filp, struct address_space *mapping,
 		put_page(f.map.mpage);
 
 	/* clean up the remaining free pages */
-	put_pages_list(&pagepool);
+	erofs_release_pages(&pagepool);
 	return 0;
 }
 
