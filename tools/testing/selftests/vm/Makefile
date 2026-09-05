@@ -3,6 +3,7 @@
 
 CFLAGS = -Wall -I ../../../../usr/include $(EXTRA_CFLAGS)
 LDLIBS = -lrt
+TEST_GEN_PROGS += process_madvise
 TEST_GEN_FILES = compaction_test
 TEST_GEN_FILES += gup_benchmark
 TEST_GEN_FILES += hugepage-mmap

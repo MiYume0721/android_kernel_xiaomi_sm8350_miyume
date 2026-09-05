@@ -4060,8 +4060,12 @@ static bool age_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsigned 
 	return true;
 }
 
-/* to protect the working set of the last N jiffies */
-static unsigned long lru_gen_min_ttl __read_mostly = 5 * HZ; // 5000ms
+/*
+ * Optional working-set protection, in jiffies. Keep the upstream default
+ * of zero: a fixed protection window can trigger premature OOM kills on
+ * memory-constrained devices. Userspace can opt in via min_ttl_ms.
+ */
+static unsigned long lru_gen_min_ttl __read_mostly;
 static int lru_gen_min_ttl_unsatisfied;
 
 static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)

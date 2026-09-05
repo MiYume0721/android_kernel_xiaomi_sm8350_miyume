@@ -140,6 +140,7 @@
 #include <linux/file.h>
 #include <linux/poll.h>
 #include <linux/psi.h>
+#include <linux/kernfs.h>
 #include "sched.h"
 
 #define CREATE_TRACE_POINTS
@@ -182,6 +183,7 @@ struct psi_group psi_system = {
 };
 
 static void psi_avgs_work(struct work_struct *work);
+static void poll_timer_fn(struct timer_list *t);
 
 static void group_init(struct psi_group *group)
 {
@@ -203,7 +205,10 @@ static void group_init(struct psi_group *group)
 	memset(group->polling_total, 0, sizeof(group->polling_total));
 	group->polling_next_update = ULLONG_MAX;
 	group->polling_until = 0;
-	rcu_assign_pointer(group->poll_kworker, NULL);
+	init_waitqueue_head(&group->poll_wait);
+	atomic_set(&group->poll_wakeup, 0);
+	timer_setup(&group->poll_timer, poll_timer_fn, 0);
+	rcu_assign_pointer(group->poll_task, NULL);
 }
 
 void __init psi_init(void)
@@ -545,7 +550,7 @@ static void init_triggers(struct psi_group *group, u64 now)
 static u64 update_triggers(struct psi_group *group, u64 now)
 {
 	struct psi_trigger *t;
-	bool new_stall = false;
+	bool update_total = false;
 	u64 *total = group->total[PSI_POLL];
 
 	/*
@@ -554,24 +559,26 @@ static u64 update_triggers(struct psi_group *group, u64 now)
 	 */
 	list_for_each_entry(t, &group->triggers, node) {
 		u64 growth;
+		bool new_stall;
 
-		/* Check for stall activity */
-		if (group->polling_total[t->state] == total[t->state])
+		new_stall = group->polling_total[t->state] != total[t->state];
+		if (!new_stall && !t->pending_event)
 			continue;
 
 		/*
-		 * Multiple triggers might be looking at the same state,
-		 * remember to update group->polling_total[] once we've
-		 * been through all of them. Also remember to extend the
-		 * polling time if we see new stall activity.
+		 * Keep threshold breaches across rate-limited windows, even
+		 * if pressure stops or falls below the threshold afterwards.
 		 */
-		new_stall = true;
-
-		/* Calculate growth since last update */
-		growth = window_update(&t->win, now, total[t->state]);
-		if (growth < t->threshold)
-			continue;
-
+		if (new_stall) {
+			/* Update shared totals only after all triggers saw them. */
+			update_total = true;
+			growth = window_update(&t->win, now, total[t->state]);
+			if (!t->pending_event) {
+				if (growth < t->threshold)
+					continue;
+				t->pending_event = true;
+			}
+		}
 		/* Limit event signaling to once per window */
 		if (now < t->last_event_time + t->win.size)
 			continue;
@@ -579,63 +586,73 @@ static u64 update_triggers(struct psi_group *group, u64 now)
 		trace_psi_event(t->state, t->threshold);
 
 		/* Generate an event */
-		if (cmpxchg(&t->event, 0, 1) == 0)
-			wake_up_interruptible(&t->event_wait);
+		if (cmpxchg(&t->event, 0, 1) == 0) {
+			if (t->of)
+				kernfs_notify(t->of->kn);
+			else
+				wake_up_interruptible(&t->event_wait);
+		}
 		t->last_event_time = now;
+		t->pending_event = false;
 	}
 
 	trace_event_helper(group);
-	if (new_stall)
+	if (update_total)
 		memcpy(group->polling_total, total,
 				sizeof(group->polling_total));
 
 	return now + group->poll_min_period;
 }
 
-/*
- * Schedule polling if it's not already scheduled. It's safe to call even from
- * hotpath because even though kthread_queue_delayed_work takes worker->lock
- * spinlock that spinlock is never contended due to poll_scheduled atomic
- * preventing such competition.
- */
-static void psi_schedule_poll_work(struct psi_group *group, unsigned long delay)
+/* Schedule polling if it's not already scheduled or forced. */
+static void psi_schedule_poll_work(struct psi_group *group, unsigned long delay,
+				   bool force)
 {
-	struct kthread_worker *kworker;
+	struct task_struct *task;
 
-	/* Do not reschedule if already scheduled */
-	if (atomic_cmpxchg(&group->poll_scheduled, 0, 1) != 0)
+	/* Full barrier pairs with the state accesses in psi_poll_work(). */
+	if (atomic_xchg(&group->poll_scheduled, 1) && !force)
 		return;
 
 	rcu_read_lock();
 
-	kworker = rcu_dereference(group->poll_kworker);
+	task = rcu_dereference(group->poll_task);
 	/*
-	 * kworker might be NULL in case psi_trigger_destroy races with
+	 * task might be NULL in case psi_trigger_destroy races with
 	 * psi_task_change (hotpath) which can't use locks
 	 */
-	if (likely(kworker))
-		kthread_queue_delayed_work(kworker, &group->poll_work, delay);
+	if (likely(task))
+		mod_timer(&group->poll_timer, jiffies + delay);
 	else
 		atomic_set(&group->poll_scheduled, 0);
 
 	rcu_read_unlock();
 }
 
-static void psi_poll_work(struct kthread_work *work)
+static void psi_poll_work(struct psi_group *group)
 {
-	struct kthread_delayed_work *dwork;
-	struct psi_group *group;
+	bool force_reschedule = false;
 	u32 changed_states;
 	u64 now;
-
-	dwork = container_of(work, struct kthread_delayed_work, work);
-	group = container_of(dwork, struct psi_group, poll_work);
-
-	atomic_set(&group->poll_scheduled, 0);
 
 	mutex_lock(&group->trigger_lock);
 
 	now = sched_clock();
+
+	if (now > group->polling_until) {
+		/*
+		 * Clear the gate only at window expiry. Clearing it at every
+		 * sample lets task changes cause redundant immediate wakeups.
+		 *
+		 * Order clearing poll_scheduled before reading task states:
+		 * if we miss a state change, the task-change atomic_xchg()
+		 * must see the cleared gate and schedule another poll.
+		 */
+		atomic_set(&group->poll_scheduled, 0);
+		smp_mb(); /* Order poll_scheduled before task state sampling. */
+	} else {
+		force_reschedule = true;
+	}
 
 	collect_percpu_times(group, PSI_POLL, &changed_states);
 
@@ -662,10 +679,35 @@ static void psi_poll_work(struct kthread_work *work)
 		group->polling_next_update = update_triggers(group, now);
 
 	psi_schedule_poll_work(group,
-		nsecs_to_jiffies(group->polling_next_update - now) + 1);
+		nsecs_to_jiffies(group->polling_next_update - now) + 1,
+		force_reschedule);
 
 out:
 	mutex_unlock(&group->trigger_lock);
+}
+
+static int psi_poll_worker(void *data)
+{
+	struct psi_group *group = data;
+
+	sched_set_fifo_low(current);
+	while (true) {
+		wait_event_interruptible(group->poll_wait,
+				 atomic_cmpxchg(&group->poll_wakeup, 1, 0) ||
+				 kthread_should_stop());
+		if (kthread_should_stop())
+			break;
+		psi_poll_work(group);
+	}
+	return 0;
+}
+
+static void poll_timer_fn(struct timer_list *t)
+{
+	struct psi_group *group = from_timer(group, t, poll_timer);
+
+	atomic_set(&group->poll_wakeup, 1);
+	wake_up_interruptible(&group->poll_wait);
 }
 
 static void record_times(struct psi_group_cpu *groupc, int cpu,
@@ -826,7 +868,7 @@ void psi_task_change(struct task_struct *task, int clear, int set)
 		u32 state_mask = psi_group_change(group, cpu, clear, set);
 
 		if (state_mask & group->poll_states)
-			psi_schedule_poll_work(group, 1);
+			psi_schedule_poll_work(group, 1, false);
 
 		if (wake_clock && !delayed_work_pending(&group->avgs_work))
 			schedule_delayed_work(&group->avgs_work, PSI_FREQ);
@@ -927,6 +969,13 @@ void psi_cgroup_free(struct cgroup *cgroup)
 		return;
 
 	cancel_delayed_work_sync(&cgroup->psi.avgs_work);
+	/*
+	 * A hotpath reader can re-arm the timer while the last trigger is
+	 * being removed. No tasks or triggers can arm it at group free time.
+	 * 5.4 has no timer_shutdown_sync(); del_timer_sync() is sufficient
+	 * here because the callback only wakes poll_wait and never re-arms.
+	 */
+	del_timer_sync(&cgroup->psi.poll_timer);
 	free_percpu(cgroup->psi.pcpu);
 	/* All triggers must be removed by now */
 	WARN_ONCE(cgroup->psi.poll_states, "psi: trigger leak\n");
@@ -1050,7 +1099,8 @@ static int psi_cpu_open(struct inode *inode, struct file *file)
 }
 
 struct psi_trigger *psi_trigger_create(struct psi_group *group,
-			char *buf, size_t nbytes, enum psi_res res)
+			char *buf, size_t nbytes, enum psi_res res,
+			struct kernfs_open_file *of)
 {
 	struct psi_trigger *t;
 	enum psi_states state;
@@ -1086,30 +1136,30 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
 	t->state = state;
 	t->threshold = threshold_us * NSEC_PER_USEC;
 	t->win.size = window_us * NSEC_PER_USEC;
-	window_reset(&t->win, 0, 0, 0);
 
 	t->event = 0;
 	t->last_event_time = 0;
-	init_waitqueue_head(&t->event_wait);
+	t->pending_event = false;
+	t->of = of;
+	if (!of)
+		init_waitqueue_head(&t->event_wait);
 
 	mutex_lock(&group->trigger_lock);
 
-	if (!rcu_access_pointer(group->poll_kworker)) {
-		struct sched_param param = {
-			.sched_priority = 1,
-		};
-		struct kthread_worker *kworker;
+	window_reset(&t->win, sched_clock(),
+		     group->total[PSI_POLL][state], 0);
+	if (!rcu_access_pointer(group->poll_task)) {
+		struct task_struct *task;
 
-		kworker = kthread_create_worker(0, "psimon");
-		if (IS_ERR(kworker)) {
+		task = kthread_create(psi_poll_worker, group, "psimon");
+		if (IS_ERR(task)) {
 			kfree(t);
 			mutex_unlock(&group->trigger_lock);
-			return ERR_CAST(kworker);
+			return ERR_CAST(task);
 		}
-		sched_setscheduler_nocheck(kworker->task, SCHED_FIFO, &param);
-		kthread_init_delayed_work(&group->poll_work,
-				psi_poll_work);
-		rcu_assign_pointer(group->poll_kworker, kworker);
+		atomic_set(&group->poll_wakeup, 0);
+		wake_up_process(task);
+		rcu_assign_pointer(group->poll_task, task);
 	}
 
 	list_add(&t->node, &group->triggers);
@@ -1126,7 +1176,7 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
 void psi_trigger_destroy(struct psi_trigger *t)
 {
 	struct psi_group *group;
-	struct kthread_worker *kworker_to_destroy = NULL;
+	struct task_struct *task_to_destroy = NULL;
 
 	/*
 	 * We do not check psi_disabled since it might have been disabled after
@@ -1137,11 +1187,13 @@ void psi_trigger_destroy(struct psi_trigger *t)
 
 	group = t->group;
 	/*
-	 * Wakeup waiters to stop polling and clear the queue to prevent it from
-	 * being accessed later. Can happen if cgroup is deleted from under a
-	 * polling process.
+	 * Cgroup waitqueues belong to kernfs and outlive trigger removal.
+	 * Procfs triggers are released only after the last file reference.
 	 */
-	wake_up_pollfree(&t->event_wait);
+	if (t->of)
+		kernfs_notify(t->of->kn);
+	else
+		wake_up_interruptible(&t->event_wait);
 
 	mutex_lock(&group->trigger_lock);
 
@@ -1153,18 +1205,22 @@ void psi_trigger_destroy(struct psi_trigger *t)
 		group->nr_triggers[t->state]--;
 		if (!group->nr_triggers[t->state])
 			group->poll_states &= ~(1 << t->state);
-		/* reset min update period for the remaining triggers */
-		list_for_each_entry(tmp, &group->triggers, node)
-			period = min(period, div_u64(tmp->win.size,
-					UPDATES_PER_WINDOW));
-		group->poll_min_period = period;
-		/* Destroy poll_kworker when the last trigger is destroyed */
+		/* Recalculate only if the removed trigger had the min window. */
+		if (group->poll_min_period ==
+		    div_u64(t->win.size, UPDATES_PER_WINDOW)) {
+			list_for_each_entry(tmp, &group->triggers, node)
+				period = min(period, div_u64(tmp->win.size,
+							    UPDATES_PER_WINDOW));
+			group->poll_min_period = period;
+		}
+		/* Stop psimon when the last trigger is destroyed. */
 		if (group->poll_states == 0) {
 			group->polling_until = 0;
-			kworker_to_destroy = rcu_dereference_protected(
-					group->poll_kworker,
+			task_to_destroy =
+				rcu_dereference_protected(group->poll_task,
 					lockdep_is_held(&group->trigger_lock));
-			rcu_assign_pointer(group->poll_kworker, NULL);
+			rcu_assign_pointer(group->poll_task, NULL);
+			del_timer(&group->poll_timer);
 		}
 	}
 
@@ -1177,20 +1233,16 @@ void psi_trigger_destroy(struct psi_trigger *t)
 	 */
 	synchronize_rcu();
 	/*
-	 * Destroy the kworker after releasing trigger_lock to prevent a
+	 * Stop psimon after releasing trigger_lock to prevent a
 	 * deadlock while waiting for psi_poll_work to acquire trigger_lock
 	 */
-	if (kworker_to_destroy) {
+	if (task_to_destroy) {
 		/*
 		 * After the RCU grace period has expired, the worker
-		 * can no longer be found through group->poll_kworker.
-		 * But it might have been already scheduled before
-		 * that - deschedule it cleanly before destroying it.
+		 * can no longer be found through group->poll_task.
 		 */
-		kthread_cancel_delayed_work_sync(&group->poll_work);
+		kthread_stop(task_to_destroy);
 		atomic_set(&group->poll_scheduled, 0);
-
-		kthread_destroy_worker(kworker_to_destroy);
 	}
 	kfree(t);
 }
@@ -1208,7 +1260,10 @@ __poll_t psi_trigger_poll(void **trigger_ptr,
 	if (!t)
 		return DEFAULT_POLLMASK | EPOLLERR | EPOLLPRI;
 
-	poll_wait(file, &t->event_wait, wait);
+	if (t->of)
+		kernfs_generic_poll(t->of, wait);
+	else
+		poll_wait(file, &t->event_wait, wait);
 
 	if (cmpxchg(&t->event, 1, 0) == 1)
 		ret |= EPOLLPRI;
@@ -1247,7 +1302,7 @@ static ssize_t psi_write(struct file *file, const char __user *user_buf,
 		return -EBUSY;
 	}
 
-	new = psi_trigger_create(&psi_system, buf, nbytes, res);
+	new = psi_trigger_create(&psi_system, buf, nbytes, res, NULL);
 	if (IS_ERR(new)) {
 		mutex_unlock(&seq->lock);
 		return PTR_ERR(new);

@@ -836,7 +836,23 @@ static long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 
 		/* first iteration or cross vma bound */
 		if (!vma || start >= vma->vm_end) {
-			vma = find_extend_vma(mm, start);
+			/*
+			 * MADV_POPULATE_(READ|WRITE) must not grow a stack VMA
+			 * and has distinct errors for holes and bad permissions.
+			 */
+			if (gup_flags & FOLL_MADV_POPULATE) {
+				vma = find_vma(mm, start);
+				if (!vma || start < vma->vm_start) {
+					ret = -ENOMEM;
+					goto out;
+				}
+				if (check_vma_flags(vma, gup_flags)) {
+					ret = -EINVAL;
+					goto out;
+				}
+			} else {
+				vma = find_extend_vma(mm, start);
+			}
 			if (!vma && in_gate_area(mm, start)) {
 				ret = get_gate_page(mm, start & PAGE_MASK,
 						gup_flags, &vma,
@@ -1288,6 +1304,37 @@ long populate_vma_page_range(struct vm_area_struct *vma,
 	 */
 	return __get_user_pages(current, mm, start, nr_pages, gup_flags,
 				NULL, NULL, locked);
+}
+
+/*
+ * Populate (prefault) page tables in an address range readable/writable.
+ * Unlike MAP_POPULATE, errors are reported to the MADV_POPULATE caller.
+ */
+long faultin_page_range(struct mm_struct *mm, unsigned long start,
+			unsigned long end, bool write, int *locked)
+{
+	unsigned long nr_pages = (end - start) / PAGE_SIZE;
+	unsigned int gup_flags;
+	long ret;
+
+	VM_BUG_ON(start & ~PAGE_MASK);
+	VM_BUG_ON(end & ~PAGE_MASK);
+	mmap_assert_locked(mm);
+
+	/*
+	 * FOLL_TOUCH marks pages accessed (and dirty for writable faults),
+	 * FOLL_HWPOISON preserves -EHWPOISON, while FOLL_MADV_POPULATE
+	 * supplies the syscall's VMA lookup and error semantics.
+	 */
+	gup_flags = FOLL_TOUCH | FOLL_POPULATE | FOLL_MLOCK |
+		    FOLL_HWPOISON | FOLL_MADV_POPULATE;
+	if (write)
+		gup_flags |= FOLL_WRITE;
+
+	ret = __get_user_pages_locked(current, mm, start, nr_pages, NULL,
+				      NULL, locked, gup_flags);
+	lru_add_drain();
+	return ret;
 }
 
 /*

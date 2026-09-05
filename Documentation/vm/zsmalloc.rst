@@ -37,29 +37,19 @@ stat
 ====
 
 With CONFIG_ZSMALLOC_STAT, we could see zsmalloc internal information via
-``/sys/kernel/debug/zsmalloc/<user name>``. Here is a sample of stat output::
+``/sys/kernel/debug/zsmalloc/<user name>/classes``. The header is::
 
  # cat /sys/kernel/debug/zsmalloc/zram0/classes
 
- class  size almost_full almost_empty obj_allocated   obj_used pages_used pages_per_zspage
-    ...
-    ...
-     9   176           0            1           186        129          8                4
-    10   192           1            0          2880       2872        135                3
-    11   208           0            1           819        795         42                2
-    12   224           0            1           219        159         12                4
-    ...
-    ...
+ class size 10% 20% 30% 40% 50% 60% 70% 80% 90% 99% 100% obj_allocated obj_used pages_used pages_per_zspage freeable
 
 
 class
 	index
 size
 	object size zspage stores
-almost_empty
-	the number of ZS_ALMOST_EMPTY zspages(see below)
-almost_full
-	the number of ZS_ALMOST_FULL zspages(see below)
+10%, 20%, ..., 90%, 99%, 100%
+	the number of zspages in each non-empty fullness group (see below)
 obj_allocated
 	the number of objects allocated
 obj_used
@@ -68,15 +58,25 @@ pages_used
 	the number of pages allocated for the class
 pages_per_zspage
 	the number of 0-order pages to make a zspage
+freeable
+	the estimated number of pages compaction could free
 
-We assign a zspage to ZS_ALMOST_EMPTY fullness group when n <= N / f, where
+Fullness groups
+===============
 
-* n = number of allocated objects
-* N = total number of objects zspage can store
-* f = fullness_threshold_frac(ie, 4 at the moment)
+There are twelve groups: empty, ten partial-use groups, and full. Let n be
+the number of live objects and N the capacity of a zspage. Empty (n == 0)
+and full (n == N) are handled separately. For partial pages, the group index
+is ``(100 * n / N) / 10 + 1``, with integer division, matching Linux 6.6.
 
-Similarly, we assign zspage to:
+The ``10%`` column covers non-empty pages below 10% occupancy, ``20%``
+covers 10% to below 20%, and so on. ``99%`` covers 90% to below 100%, while
+``100%`` contains only full pages. A tiny nonzero occupancy never belongs
+to the empty group. Empty pages awaiting deferred release are tracked
+internally but omitted from the displayed fullness columns.
 
-* ZS_ALMOST_FULL  when n > N / f
-* ZS_EMPTY        when n == 0
-* ZS_FULL         when n == N
+Allocation searches non-full groups from highest occupancy downwards.
+Compaction selects sources from lowest occupancy upwards and destinations
+from highest occupancy downwards, excluding empty and full groups. This
+backport retains the existing per-class locking, migration implementation,
+and maximum of four base pages per zspage.

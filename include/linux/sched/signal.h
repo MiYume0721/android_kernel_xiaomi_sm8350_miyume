@@ -228,10 +228,22 @@ struct signal_struct {
 	struct mutex cred_guard_mutex;	/* guard against foreign influences on
 					 * credential calculations
 					 * (notably. ptrace) */
+	/* Protect mm/credential transitions during exec, without userspace waits. */
+#if defined(CONFIG_DEBUG_SPINLOCK) || defined(CONFIG_DEBUG_MUTEXES) || \
+	defined(CONFIG_DEBUG_LOCK_ALLOC)
+	/* Debug mutexes may exceed the production ABI's 32 bytes of padding. */
+	struct mutex exec_update_mutex;
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
 	ANDROID_KABI_RESERVE(3);
 	ANDROID_KABI_RESERVE(4);
+#else
+	_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(1);
+			      ANDROID_KABI_RESERVE(2);
+			      ANDROID_KABI_RESERVE(3);
+			      ANDROID_KABI_RESERVE(4),
+			      struct mutex exec_update_mutex);
+#endif
 } __randomize_layout;
 
 /*

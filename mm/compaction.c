@@ -53,6 +53,9 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
 /* Periodic fragmentation-score check used by proactive compaction. */
 #define HPAGE_FRAG_CHECK_INTERVAL_MSEC	500
 
+/* Stable, low-fragmentation nodes need at most a 2 s periodic check. */
+#define COMPACT_IDLE_MAX_DEFER_SHIFT	2
+
 /* Order against which the node fragmentation score is calculated. */
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE)
 #define COMPACTION_HPAGE_ORDER	HPAGE_PMD_ORDER
@@ -1895,14 +1898,28 @@ static unsigned int fragmentation_score_wmark(bool low)
 	return low ? wmark_low : min(wmark_low + 10, 100U);
 }
 
-static bool should_proactive_compact_node(pg_data_t *pgdat)
+static bool should_proactive_compact_node(pg_data_t *pgdat, unsigned int score)
 {
 	if (!READ_ONCE(sysctl_compaction_proactiveness) ||
 	    kswapd_is_running(pgdat))
 		return false;
 
-	return fragmentation_score_node(pgdat) >
-		fragmentation_score_wmark(false);
+	return score > fragmentation_score_wmark(false);
+}
+
+/*
+ * Back off only while the node remains below the low watermark and its
+ * score is unchanged. Demand-driven wakeups still interrupt this timeout.
+ * Do not delay follow-up checks during reclaim or after an explicit request.
+ */
+static unsigned int proactive_compact_idle_shift(unsigned int shift,
+		unsigned int score, unsigned int prev_score, unsigned int low_wmark,
+		bool forced, bool reclaiming)
+{
+	if (forced || reclaiming || score > low_wmark || score != prev_score)
+		return 0;
+
+	return min(shift + 1, (unsigned int)COMPACT_IDLE_MAX_DEFER_SHIFT);
 }
 
 static enum compact_result __compact_finished(struct compact_control *cc)
@@ -2756,6 +2773,8 @@ static int kcompactd(void *p)
 	long default_timeout =
 		msecs_to_jiffies(HPAGE_FRAG_CHECK_INTERVAL_MSEC);
 	long timeout = default_timeout;
+	unsigned int idle_shift = 0;
+	unsigned int prev_idle_score = 101; /* Outside the valid [0, 100] range. */
 
 	const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
 
@@ -2770,6 +2789,7 @@ static int kcompactd(void *p)
 
 	while (!kthread_should_stop()) {
 		unsigned long pflags;
+		unsigned int score;
 
 		/* Avoid timer wakeups while proactive compaction is disabled. */
 		if (!READ_ONCE(sysctl_compaction_proactiveness))
@@ -2783,19 +2803,40 @@ static int kcompactd(void *p)
 			kcompactd_do_work(pgdat);
 			psi_memstall_leave(&pflags);
 			timeout = default_timeout;
+			idle_shift = 0;
+			prev_idle_score = 101;
 			continue;
 		}
 
 		timeout = default_timeout;
-		if (should_proactive_compact_node(pgdat)) {
-			unsigned int prev_score, score;
+		/* Do not scan fragmentation while reclaim has priority. */
+		if (!READ_ONCE(sysctl_compaction_proactiveness) ||
+		    kswapd_is_running(pgdat)) {
+			idle_shift = 0;
+			prev_idle_score = 101;
+			WRITE_ONCE(pgdat->proactive_compact_trigger, false);
+			continue;
+		}
+		/* Sample the node once for both the trigger and idle policy. */
+		score = fragmentation_score_node(pgdat);
+		if (should_proactive_compact_node(pgdat, score)) {
+			unsigned int prev_score = score;
 
-			prev_score = fragmentation_score_node(pgdat);
+			idle_shift = 0;
+			prev_idle_score = 101;
 			proactive_compact_node(pgdat);
 			score = fragmentation_score_node(pgdat);
 			if (score >= prev_score)
 				timeout = default_timeout <<
 					COMPACT_MAX_DEFER_SHIFT;
+		} else {
+			idle_shift = proactive_compact_idle_shift(idle_shift,
+					score, prev_idle_score,
+					fragmentation_score_wmark(true),
+					READ_ONCE(pgdat->proactive_compact_trigger),
+					kswapd_is_running(pgdat));
+			prev_idle_score = score;
+			timeout = default_timeout << idle_shift;
 		}
 		WRITE_ONCE(pgdat->proactive_compact_trigger, false);
 	}

@@ -34,6 +34,16 @@ extern unsigned int sysctl_sched_force_lb_enable;
 extern unsigned int sysctl_hh_suspend_timeout_ms;
 #endif
 #ifdef CONFIG_SCHED_WALT
+/* Keep Xiaomi's bit numbering; unsupported TRAILBLAZER/IPC bits are rejected. */
+#define MIUI_POWER_ENHANCE_CLUSTER_PACKING	(1U << 2)
+#define MIUI_POWER_ENHANCE_CPU_BUSY_THRES		(1U << 3)
+#define MIUI_POWER_ENHANCE_MASK	(MIUI_POWER_ENHANCE_CLUSTER_PACKING | \
+				 MIUI_POWER_ENHANCE_CPU_BUSY_THRES)
+extern unsigned int miui_power_enhance;
+extern int sys_miui_power_enhance_handler(struct ctl_table *table, int write,
+					void __user *buffer, size_t *lenp,
+					loff_t *ppos);
+
 extern unsigned int sysctl_sched_capacity_margin_up[MAX_MARGIN_LEVELS];
 extern unsigned int sysctl_sched_capacity_margin_down[MAX_MARGIN_LEVELS];
 extern unsigned int sysctl_sched_user_hint;

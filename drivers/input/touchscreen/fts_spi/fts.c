@@ -6343,6 +6343,8 @@ static int fts_set_fod_status(int value)
 static int fts_set_aod_status(int value)
 {
 	fts_info->aod_status = value;
+	fts_info->aod_status_from_display = false;
+	schedule_work(&fts_info->switch_mode_work);
 	return 0;
 }
 
@@ -6390,8 +6392,11 @@ static int fts_set_cur_value(int mode, int value)
 		xiaomi_touch_interfaces.touch_mode[mode][GET_CUR_VALUE] = value;
 		return fts_set_fod_status(value);
 	}
-	if (mode == Touch_Aod_Enable && fts_info && value >= 0)
+	if (mode == Touch_Aod_Enable && fts_info && value >= 0) {
+		xiaomi_touch_interfaces.touch_mode[mode][SET_CUR_VALUE] = value;
+		xiaomi_touch_interfaces.touch_mode[mode][GET_CUR_VALUE] = value;
 		return fts_set_aod_status(value);
+	}
 	if (mode == Touch_Doubletap_Mode && fts_info && value >= 0) {
 		fts_info->gesture_enabled = value;
 		schedule_work(&fts_info->switch_mode_work);
@@ -6408,9 +6413,9 @@ static int fts_set_cur_value(int mode, int value)
 	if (mode == Touch_Power_Status && fts_info && value >= 0) {
 		flush_workqueue(fts_info->event_wq);
 		logError(1, "%s %s: switch sensor state\n", tag, __func__);
-		if (value && fts_info->sensor_sleep) {
+		if (value) {
 			queue_work(fts_info->event_wq, &fts_info->resume_work);
-		} else if (!value && !fts_info->sensor_sleep) {
+		} else {
 			queue_work(fts_info->event_wq, &fts_info->suspend_work);
 		}
 		return 0;
@@ -6698,17 +6703,23 @@ static int fts_enable_click_touch_raw(int count)
 static void fts_resume_work(struct work_struct *work)
 {
 	struct fts_ts_info *info;
+	int res = OK;
 #ifdef CONFIG_FACTORY_BUILD
 	int retval = 0;
 #endif
 	info = container_of(work, struct fts_ts_info, resume_work);
+	/* event_wq serializes power transitions; gesture updates stay separate. */
+	if (info->power_state_valid && !info->sensor_sleep)
+		return;
+	info->power_state_valid = false;
 #ifndef CONFIG_FACTORY_BUILD
-	fts_disableInterrupt();
+	res |= fts_disableInterrupt();
 #ifdef CONFIG_SECURE_TOUCH
 	fts_secure_stop(info, true);
 #endif
 #else
 	retval = fts_enable_reg(info, true);
+	res |= retval;
 	if (retval < 0) {
 		logError(1, "%s %s: ERROR Failed to enable regulators\n", tag,
 		__func__);
@@ -6720,14 +6731,14 @@ static void fts_resume_work(struct work_struct *work)
 	if (!info->fod_pressed) {
 #endif
 #endif
-	fts_system_reset();
+	res |= fts_system_reset();
 	release_all_touches(info);
 #ifndef CONFIG_FACTORY_BUILD
 #ifdef FTS_FOD_AREA_REPORT
 	}
 #endif
 #endif
-	fts_mode_handler(info, 0);
+	res |= fts_mode_handler(info, 0);
 #ifdef CONFIG_FTS_POWERSUPPLY_CB
 	if (info->probe_ok)
 		fts_write_charge_status(info->charging_status);
@@ -6735,7 +6746,7 @@ static void fts_resume_work(struct work_struct *work)
 	info->sensor_sleep = false;
 	info->sleep_finger = 0;
 
-	fts_enableInterrupt();
+	res |= fts_enableInterrupt();
 #ifdef FTS_XIAOMI_TOUCHFEATURE
 	if (info->palm_sensor_switch && !info->palm_sensor_changed) {
 		fts_palm_sensor_cmd(info->palm_sensor_switch);
@@ -6750,6 +6761,7 @@ static void fts_resume_work(struct work_struct *work)
 	}
 #endif
 
+	info->power_state_valid = (res >= OK);
 	xiaomi_touch_set_suspend_state(XIAOMI_TOUCH_RESUME);
 /*
 	if (info->enable_touch_raw)
@@ -6763,11 +6775,16 @@ static void fts_resume_work(struct work_struct *work)
 static void fts_suspend_work(struct work_struct *work)
 {
 	struct fts_ts_info *info;
+	int res = OK;
 #ifdef CONFIG_FACTORY_BUILD
 	int retval = 0;
 #endif
 
 	info = container_of(work, struct fts_ts_info, suspend_work);
+	/* AOD/double-tap/non-UI changes still use switch_mode_work in suspend. */
+	if (info->power_state_valid && info->sensor_sleep)
+		return;
+	info->power_state_valid = false;
 /*
 	if (info->enable_touch_raw) {
 		logError(1, "%s %s: touch rawdata working, skip\n", tag,
@@ -6788,25 +6805,27 @@ static void fts_suspend_work(struct work_struct *work)
 		info->palm_sensor_switch = false;
 	}
 #endif
-	fts_disableInterrupt();
+	res |= fts_disableInterrupt();
 	info->resume_bit = 0;
-	fts_mode_handler(info, 0);
+	res |= fts_mode_handler(info, 0);
 	release_all_touches(info);
 
 	info->sensor_sleep = true;
 #ifdef CONFIG_FACTORY_BUILD
 	retval = fts_enable_reg(info, false);
+	res |= retval;
 	if (retval < 0) {
 		logError(1, "%s %s: ERROR Failed to enable regulators\n", tag,
 			__func__);
 	}
 #else
 	if (info->gesture_enabled || fts_need_enter_lp_mode())
-		fts_enableInterrupt();
+		res |= fts_enableInterrupt();
 #endif
 #ifdef CONFIG_FTS_BOOST
 	lpm_disable_for_dev(false, EVENT_INPUT);
 #endif
+	info->power_state_valid = (res >= OK);
 	xiaomi_touch_set_suspend_state(XIAOMI_TOUCH_SUSPEND);
 }
 
@@ -6843,8 +6862,21 @@ static int fts_drm_state_chg_callback(struct notifier_block *nb,
 
 		if (val == MI_DISP_DPMS_EARLY_EVENT && (blank == MI_DISP_DPMS_POWERDOWN ||
 			blank == MI_DISP_DPMS_LP1 || blank == MI_DISP_DPMS_LP2)) {
-			if (info->sensor_sleep)
-				return NOTIFY_OK;
+			/*
+			 * Some non-MIUI userspaces do not restore Touch_Aod_Enable
+			 * after boot.  An LP1/LP2 transition is an unambiguous signal
+			 * that the display is running an AOD session, so arm single-tap
+			 * as a fallback.  A later explicit touchfeature request always
+			 * takes ownership of aod_status again.
+			 */
+			if (blank != MI_DISP_DPMS_POWERDOWN && !info->aod_status) {
+				info->aod_status = 1;
+				info->aod_status_from_display = true;
+				logError(1, "%s %s: enable AOD single-tap fallback from LP%u\n",
+					 tag, __func__, blank);
+				if (info->sensor_sleep)
+					schedule_work(&info->switch_mode_work);
+			}
 
 			logError(1, "%s %s: FB_BLANK %s\n", tag,
 				 __func__, blank == MI_DISP_DPMS_POWERDOWN ? "POWER DOWN" : "LP");
@@ -6852,12 +6884,17 @@ static int fts_drm_state_chg_callback(struct notifier_block *nb,
 			flush_workqueue(info->event_wq);
 			queue_work(info->event_wq, &info->suspend_work);
 		} else if (val == MI_DISP_DPMS_EVENT && blank == MI_DISP_DPMS_ON) {
-			if (!info->sensor_sleep)
-				return NOTIFY_OK;
+			if (info->aod_status_from_display) {
+				info->aod_status = 0;
+				info->aod_status_from_display = false;
+				logError(1, "%s %s: clear display-derived AOD single-tap state\n",
+					 tag, __func__);
+			}
 
 			logError(1, "%s %s: FB_BLANK_UNBLANK\n", tag,
 				 __func__);
 
+			/* The worker checks state after older transitions have drained. */
 			flush_workqueue(info->event_wq);
 			queue_work(info->event_wq, &info->resume_work);
 		}
@@ -7749,20 +7786,43 @@ static int parse_dt(struct device *dev, struct fts_hw_platform_data *bdata)
 static void fts_switch_mode_work(struct work_struct *work)
 {
 	struct fts_ts_info *info = container_of(work, struct fts_ts_info, switch_mode_work);
-	u8 gesture_type = fts_need_enter_lp_mode();
-	u8 gesture_cmd[6] = {0xA2, 0x03, 0x00, 0x00, 0x00, gesture_type};
+	u8 gesture_type;
+	u8 gesture_cmd[6] = {0xA2, 0x03, 0x00, 0x00, 0x00, 0x00};
 	int res = 0;
+	int ret;
 
 	if (info->resume_bit) {
 		logError(1, "%s %s touch in resume mode, don't need to set gesture cmds\n", tag, __func__);
 		return;
 	}
+
+	gesture_type = fts_need_enter_lp_mode();
+	gesture_cmd[5] = gesture_type;
+	if (!gesture_type && !info->gesture_enabled)
+		fts_disableInterrupt();
+
+	mutex_lock(&info->fod_mutex);
 	if (info->gesture_enabled)
 		gesture_cmd[2] = 0x20;
-	res = fts_write_dma_safe(gesture_cmd, ARRAY_SIZE(gesture_cmd));
-	if (res < OK)
-		logError(1, "%s %s: send gesture cmd error! ERROR %08X recovery in senseOff...\n",
-			 tag, __func__, res);
+
+	if (gesture_type || info->gesture_enabled) {
+		res = fts_write_dma_safe(gesture_cmd, ARRAY_SIZE(gesture_cmd));
+		if (res < OK)
+			logError(1, "%s %s: send gesture cmd error! ERROR %08X\n",
+				 tag, __func__, res);
+		ret = setScanMode(SCAN_MODE_LOW_POWER, 0);
+		res |= ret;
+	} else {
+		ret = setScanMode(SCAN_MODE_ACTIVE, 0x00);
+		res |= ret;
+	}
+	mutex_unlock(&info->fod_mutex);
+
+	if (gesture_type || info->gesture_enabled)
+		fts_enableInterrupt();
+
+	logError(1, "%s %s: applied gesture type:%u, doubletap:%d, result:%08X\n",
+		 tag, __func__, gesture_type, info->gesture_enabled, res);
 }
 #endif
 
@@ -8416,8 +8476,8 @@ static int fts_probe(struct spi_device *client)
 	logError(0, "%s SET Event Handler: \n", tag);
 
 	info->event_wq =
-	    alloc_workqueue("fts-event-queue",
-			    WQ_UNBOUND | WQ_HIGHPRI | WQ_CPU_INTENSIVE, 1);
+	    alloc_ordered_workqueue("fts-event-queue",
+				   WQ_HIGHPRI | WQ_CPU_INTENSIVE);
 	if (!info->event_wq) {
 		logError(1, "%s ERROR: Cannot create work thread\n", tag);
 		error = -ENOMEM;

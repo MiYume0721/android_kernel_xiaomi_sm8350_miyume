@@ -26,6 +26,7 @@
 #include <trace/hooks/sched.h>
 
 #include "walt/walt.h"
+#include "walt/miui_power.h"
 
 #ifdef CONFIG_SMP
 static inline bool task_fits_max(struct task_struct *p, int cpu);
@@ -6677,6 +6678,83 @@ enum fastpaths {
 	PREV_CPU_FASTPATH,
 };
 
+/*
+ * Backport Xiaomi's light-task first/second-CPU packing choice.  Use it only
+ * after the existing WALT placement/packing checks; keep the idle candidate
+ * and the caller's energy comparison instead of adding an unconditional
+ * fast path.  Unlike the donor, exclude unavailable CPUs before ranking.
+ */
+static int walt_miui_packing_cpu(struct task_struct *p, int target_cpu,
+				struct find_best_target_env *env)
+{
+	struct walt_sched_cluster *cluster;
+	unsigned long cluster_util = 0, cluster_capacity = 0;
+	unsigned long util, demand, min_util = ULONG_MAX;
+	cpumask_t active_cpus;
+	int cpu, first_cpu, packing_cpu = -1, considered = 0;
+
+	if (!(READ_ONCE(miui_power_enhance) & MIUI_POWER_ENHANCE_CLUSTER_PACKING))
+		return -1;
+	if (target_cpu < 0 || p->state != TASK_WAKING || env->need_idle ||
+	    env->boosted || env->is_rtg || env->strict_max ||
+	    task_placement_boost_enabled(p))
+		return -1;
+
+	cluster = cpu_rq(target_cpu)->wrq.cluster;
+	if (cluster->id >= num_sched_clusters - 1 ||
+	    cluster != cpu_rq(env->start_cpu)->wrq.cluster ||
+	    prefer_spread_on_idle(target_cpu, false))
+		return -1;
+	if (uclamp_task_util(p) >= MIUI_PACKING_IDLE_UTIL / 2)
+		return -1;
+
+	cpumask_and(&active_cpus, &cluster->cpus, cpu_active_mask);
+	cpumask_andnot(&active_cpus, &active_cpus, cpu_isolated_mask);
+	first_cpu = cpumask_first(&active_cpus);
+	if (first_cpu >= nr_cpu_ids)
+		return -1;
+	if (arch_scale_freq_capacity(first_cpu) > MIUI_PACKING_FREQ_SCALE)
+		return -1;
+
+	/* 5.4 has no donor per-cluster utilization cache. */
+	for_each_cpu(cpu, &active_cpus) {
+		cluster_util += cpu_util(cpu);
+		cluster_capacity += capacity_orig_of(cpu);
+	}
+	if (!cluster_capacity || cluster_util * 100 >=
+	    cluster_capacity * MIUI_PACKING_CLUSTER_PCT)
+		return -1;
+
+	cpumask_and(&active_cpus, &active_cpus, p->cpus_ptr);
+	for_each_cpu(cpu, &active_cpus) {
+		if (is_reserved(cpu) || sched_cpu_high_irqload(cpu) ||
+		    cpu == env->skip_cpu ||
+		    per_task_boost(cpu_rq(cpu)->curr) == TASK_BOOST_STRICT_MAX)
+			continue;
+		/* Do not wake a deep-idle CPU just to obtain a packing target. */
+		if (idle_cpu(cpu) && idle_get_state_idx(cpu_rq(cpu)) > 1)
+			continue;
+		if (!task_fits_max(p, cpu))
+			continue;
+
+		util = cpu_util(cpu);
+		demand = task_in_cum_window_demand(cpu_rq(cpu), p) ?
+			  0 : uclamp_task_util(p);
+		if (util >= MIUI_PACKING_IDLE_UTIL ||
+		    add_capacity_margin(cpu_util_cum(cpu, demand), cpu) >
+		    capacity_curr_of(cpu))
+			continue;
+		if (util < min_util) {
+			min_util = util;
+			packing_cpu = cpu;
+		}
+		if (++considered == 2)
+			break;
+	}
+
+	return packing_cpu;
+}
+
 static void walt_find_best_target(struct sched_domain *sd, cpumask_t *cpus,
 					struct task_struct *p,
 					struct find_best_target_env *fbt_env)
@@ -6688,6 +6766,7 @@ static void walt_find_best_target(struct sched_domain *sd, cpumask_t *cpus,
 	int shallowest_idle_cstate = INT_MAX;
 	int best_idle_cpu = -1;
 	int target_cpu = -1;
+	int packing_cpu;
 	int i, start_cpu;
 	long spare_wake_cap, most_spare_wake_cap = 0;
 	int most_spare_cap_cpu = -1;
@@ -6901,6 +6980,10 @@ static void walt_find_best_target(struct sched_domain *sd, cpumask_t *cpus,
 
 	walt_adjust_cpus_for_packing(p, &target_cpu, &best_idle_cpu,
 				shallowest_idle_cstate, fbt_env);
+
+	packing_cpu = walt_miui_packing_cpu(p, target_cpu, fbt_env);
+	if (packing_cpu >= 0)
+		target_cpu = packing_cpu;
 
 	/*
 	 * We set both idle and target as long as they are valid CPUs.

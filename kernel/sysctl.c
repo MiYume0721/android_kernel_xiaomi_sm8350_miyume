@@ -611,6 +611,14 @@ static struct ctl_table kern_table[] = {
 		.extra2		= &four,
 	},
 	{
+		.procname	= "sys_miui_power_enhance",
+		.data		= &miui_power_enhance,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= sys_miui_power_enhance_handler,
+		.extra1		= SYSCTL_ZERO,
+	},
+	{
 		.procname	= "walt_rtg_cfs_boost_prio",
 		.data		= &sysctl_walt_rtg_cfs_boost_prio,
 		.maxlen		= sizeof(unsigned int),

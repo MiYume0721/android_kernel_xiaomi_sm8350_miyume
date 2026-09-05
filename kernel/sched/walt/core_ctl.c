@@ -14,9 +14,11 @@
 #include <linux/syscore_ops.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/sched/core_ctl.h>
+#include <linux/sysctl.h>
 
 #include <trace/events/sched.h>
 #include "qc_vas.h"
+#include "miui_power.h"
 
 #define MAX_NR_HISTORY_COUNT	2
 struct cluster_data {
@@ -75,10 +77,61 @@ static void apply_need(struct cluster_data *state);
 static void wake_up_core_ctl_thread(struct cluster_data *state);
 static bool initialized;
 
+/* Opt-in, like the Xiaomi donor.  Serialize complete sysctl transactions. */
+unsigned int __read_mostly miui_power_enhance;
+static DEFINE_MUTEX(miui_power_lock);
+
 ATOMIC_NOTIFIER_HEAD(core_ctl_notifier);
 static unsigned int last_nr_big;
 
 static unsigned int get_active_cpu_count(const struct cluster_data *cluster);
+
+int sys_miui_power_enhance_handler(struct ctl_table *table, int write,
+				 void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table tmp = *table;
+	struct cluster_data *cluster;
+	unsigned int old, value, index = 0;
+	unsigned long flags;
+	int ret;
+
+	mutex_lock(&miui_power_lock);
+	old = READ_ONCE(miui_power_enhance);
+	value = old;
+	tmp.data = &value;
+	ret = proc_douintvec_minmax(&tmp, write, buffer, lenp, ppos);
+	if (ret || !write)
+		goto out;
+	if (value & ~MIUI_POWER_ENHANCE_MASK) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	spin_lock_irqsave(&state_lock, flags);
+	WRITE_ONCE(miui_power_enhance, value);
+	spin_unlock_irqrestore(&state_lock, flags);
+
+	if ((old ^ value) & MIUI_POWER_ENHANCE_CPU_BUSY_THRES) {
+		for_each_cluster(cluster, index) {
+			if (cluster->inited)
+				apply_need(cluster);
+		}
+	}
+out:
+	mutex_unlock(&miui_power_lock);
+	return ret;
+}
+
+/* state_lock protects the baseline pair and the selected policy. */
+static void core_ctl_busy_thresholds(const struct cluster_data *cluster,
+				     unsigned int index, unsigned int *up,
+				     unsigned int *down)
+{
+	*up = cluster->busy_up_thres[index];
+	*down = cluster->busy_down_thres[index];
+	if (miui_power_enhance & MIUI_POWER_ENHANCE_CPU_BUSY_THRES)
+		miui_core_ctl_adjust_thresholds(up, down);
+}
 
 /* ========================= sysfs interface =========================== */
 
@@ -186,6 +239,7 @@ static ssize_t store_busy_up_thres(struct cluster_data *state,
 					const char *buf, size_t count)
 {
 	unsigned int val[MAX_CPUS_PER_CLUSTER];
+	unsigned long flags;
 	int ret, i;
 
 	ret = sscanf(buf, "%u %u %u %u %u %u\n",
@@ -194,6 +248,7 @@ static ssize_t store_busy_up_thres(struct cluster_data *state,
 	if (ret != 1 && ret != state->num_cpus)
 		return -EINVAL;
 
+	spin_lock_irqsave(&state_lock, flags);
 	if (ret == 1) {
 		for (i = 0; i < state->num_cpus; i++)
 			state->busy_up_thres[i] = val[0];
@@ -201,6 +256,7 @@ static ssize_t store_busy_up_thres(struct cluster_data *state,
 		for (i = 0; i < state->num_cpus; i++)
 			state->busy_up_thres[i] = val[i];
 	}
+	spin_unlock_irqrestore(&state_lock, flags);
 	apply_need(state);
 	return count;
 }
@@ -221,6 +277,7 @@ static ssize_t store_busy_down_thres(struct cluster_data *state,
 					const char *buf, size_t count)
 {
 	unsigned int val[MAX_CPUS_PER_CLUSTER];
+	unsigned long flags;
 	int ret, i;
 
 	ret = sscanf(buf, "%u %u %u %u %u %u\n",
@@ -229,6 +286,7 @@ static ssize_t store_busy_down_thres(struct cluster_data *state,
 	if (ret != 1 && ret != state->num_cpus)
 		return -EINVAL;
 
+	spin_lock_irqsave(&state_lock, flags);
 	if (ret == 1) {
 		for (i = 0; i < state->num_cpus; i++)
 			state->busy_down_thres[i] = val[0];
@@ -236,6 +294,7 @@ static ssize_t store_busy_down_thres(struct cluster_data *state,
 		for (i = 0; i < state->num_cpus; i++)
 			state->busy_down_thres[i] = val[i];
 	}
+	spin_unlock_irqrestore(&state_lock, flags);
 	apply_need(state);
 	return count;
 }
@@ -250,6 +309,36 @@ static ssize_t show_busy_down_thres(const struct cluster_data *state, char *buf)
 
 	count += snprintf(buf + count, PAGE_SIZE - count, "\n");
 	return count;
+}
+
+static ssize_t show_busy_thres_effective(const struct cluster_data *state,
+					char *buf, bool show_up)
+{
+	unsigned int up, down;
+	unsigned long flags;
+	int i, count = 0;
+
+	spin_lock_irqsave(&state_lock, flags);
+	for (i = 0; i < state->num_cpus; i++) {
+		core_ctl_busy_thresholds(state, i, &up, &down);
+		count += scnprintf(buf + count, PAGE_SIZE - count, "%u ",
+				   show_up ? up : down);
+	}
+	spin_unlock_irqrestore(&state_lock, flags);
+	count += scnprintf(buf + count, PAGE_SIZE - count, "\n");
+	return count;
+}
+
+static ssize_t show_busy_up_thres_effective(const struct cluster_data *state,
+					   char *buf)
+{
+	return show_busy_thres_effective(state, buf, true);
+}
+
+static ssize_t show_busy_down_thres_effective(const struct cluster_data *state,
+					     char *buf)
+{
+	return show_busy_thres_effective(state, buf, false);
 }
 
 static ssize_t store_enable(struct cluster_data *state,
@@ -414,6 +503,8 @@ core_ctl_attr_rw(max_cpus);
 core_ctl_attr_rw(offline_delay_ms);
 core_ctl_attr_rw(busy_up_thres);
 core_ctl_attr_rw(busy_down_thres);
+core_ctl_attr_ro(busy_up_thres_effective);
+core_ctl_attr_ro(busy_down_thres_effective);
 core_ctl_attr_rw(task_thres);
 core_ctl_attr_rw(nr_prev_assist_thresh);
 core_ctl_attr_ro(need_cpus);
@@ -428,6 +519,8 @@ static struct attribute *default_attrs[] = {
 	&offline_delay_ms.attr,
 	&busy_up_thres.attr,
 	&busy_down_thres.attr,
+	&busy_up_thres_effective.attr,
+	&busy_down_thres_effective.attr,
 	&task_thres.attr,
 	&nr_prev_assist_thresh.attr,
 	&enable.attr,
@@ -808,6 +901,7 @@ static bool eval_need(struct cluster_data *cluster)
 	unsigned long flags;
 	struct cpu_data *c;
 	unsigned int need_cpus = 0, last_need, thres_idx;
+	unsigned int busy_up, busy_down;
 	bool adj_now = false;
 	bool adj_possible = false;
 	unsigned int new_need;
@@ -823,13 +917,14 @@ static bool eval_need(struct cluster_data *cluster)
 	} else {
 		cluster->active_cpus = get_active_cpu_count(cluster);
 		thres_idx = cluster->active_cpus ? cluster->active_cpus - 1 : 0;
+		core_ctl_busy_thresholds(cluster, thres_idx, &busy_up, &busy_down);
 		list_for_each_entry(c, &cluster->lru, sib) {
 			bool old_is_busy = c->is_busy;
 
-			if (c->busy >= cluster->busy_up_thres[thres_idx] ||
+			if (c->busy >= busy_up ||
 			    sched_cpu_high_irqload(c->cpu))
 				c->is_busy = true;
-			else if (c->busy < cluster->busy_down_thres[thres_idx])
+			else if (c->busy < busy_down)
 				c->is_busy = false;
 
 			trace_core_ctl_set_busy(c->cpu, c->busy, old_is_busy,

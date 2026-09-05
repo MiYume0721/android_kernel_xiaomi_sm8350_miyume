@@ -246,6 +246,16 @@ static const struct futex_q futex_q_init = {
 	.bitset = FUTEX_BITSET_MATCH_ANY
 };
 
+/**
+ * struct futex_vector - Kernel state for one futex_waitv entry
+ * @w: Userspace-provided waiter description
+ * @q: Kernel-side futex queue state
+ */
+struct futex_vector {
+	struct futex_waitv w;
+	struct futex_q q;
+};
+
 /*
  * Hash buckets are shared by all the futex_keys that hash to the same
  * location.  Each key may have multiple futex_q structures, one for each task
@@ -2746,6 +2756,139 @@ static void futex_wait_queue_me(struct futex_hash_bucket *hb, struct futex_q *q,
 }
 
 /**
+ * unqueue_multiple - Remove a vector of futexes from their hash buckets
+ * @v: Futex vector
+ * @count: Number of entries
+ *
+ * Return: index of the last futex already removed by a waker, or -1.
+ */
+static int unqueue_multiple(struct futex_vector *v, int count)
+{
+	int ret = -1, i;
+
+	for (i = 0; i < count; i++) {
+		if (!unqueue_me(&v[i].q))
+			ret = i;
+	}
+
+	return ret;
+}
+
+/*
+ * Unlike newer kernels, this 5.4 futex core takes a key reference in
+ * get_futex_key(). Drop keys which were resolved but never queued.
+ */
+static void put_waitv_keys(struct futex_vector *vs, int start, int count)
+{
+	int i;
+
+	for (i = start; i < count; i++)
+		put_futex_key(&vs[i].q.key);
+}
+
+static int futex_wait_multiple_setup(struct futex_vector *vs, int count,
+				     int *woken)
+{
+	struct futex_hash_bucket *hb;
+	bool retry = false;
+	int ret, i;
+	u32 uval;
+
+retry:
+	/* Resolve all keys before changing task state; shared keys may fault. */
+	for (i = 0; i < count; i++) {
+		if ((vs[i].w.flags & FUTEX_PRIVATE_FLAG) && retry)
+			continue;
+
+		ret = get_futex_key(u64_to_user_ptr(vs[i].w.uaddr),
+				    !(vs[i].w.flags & FUTEX_PRIVATE_FLAG),
+				    &vs[i].q.key, FUTEX_READ);
+		if (unlikely(ret)) {
+			put_waitv_keys(vs, 0, i);
+			return ret;
+		}
+	}
+
+	set_current_state(TASK_INTERRUPTIBLE);
+
+	for (i = 0; i < count; i++) {
+		u32 __user *uaddr = u64_to_user_ptr(vs[i].w.uaddr);
+		struct futex_q *q = &vs[i].q;
+		u32 val = (u32)vs[i].w.val;
+
+		hb = queue_lock(q);
+		ret = get_futex_value_locked(&uval, uaddr);
+
+		if (!ret && uval == val) {
+			queue_me(q, hb);
+			continue;
+		}
+
+		queue_unlock(hb);
+		__set_current_state(TASK_RUNNING);
+
+		*woken = unqueue_multiple(vs, i);
+		put_waitv_keys(vs, i, count);
+		if (*woken >= 0)
+			return 1;
+
+		if (ret) {
+			if (get_user(uval, uaddr))
+				return -EFAULT;
+
+			retry = true;
+			goto retry;
+		}
+
+		if (uval != val)
+			return -EWOULDBLOCK;
+	}
+
+	return 0;
+}
+
+static void futex_sleep_multiple(struct futex_vector *vs, unsigned int count,
+				 struct hrtimer_sleeper *to)
+{
+	if (to && !to->task)
+		return;
+
+	for (; count; count--, vs++) {
+		if (!READ_ONCE(vs->q.lock_ptr))
+			return;
+	}
+
+	freezable_schedule();
+}
+
+static int futex_wait_multiple(struct futex_vector *vs, unsigned int count,
+			       struct hrtimer_sleeper *to)
+{
+	int ret, hint = 0;
+
+	if (to)
+		hrtimer_sleeper_start_expires(to, HRTIMER_MODE_ABS);
+
+	for (;;) {
+		ret = futex_wait_multiple_setup(vs, count, &hint);
+		if (ret)
+			return ret > 0 ? hint : ret;
+
+		futex_sleep_multiple(vs, count, to);
+		__set_current_state(TASK_RUNNING);
+
+		ret = unqueue_multiple(vs, count);
+		if (ret >= 0)
+			return ret;
+
+		if (to && !to->task)
+			return -ETIMEDOUT;
+		if (signal_pending(current))
+			return -ERESTARTSYS;
+	}
+}
+
+/**
  * futex_wait_setup() - Prepare to wait on a futex
  * @uaddr:	the futex userspace address
  * @val:	the expected value
@@ -3947,6 +4090,86 @@ SYSCALL_DEFINE6(futex, u32 __user *, uaddr, int, op, u32, val,
 		val2 = (u32) (unsigned long) utime;
 
 	return do_futex(uaddr, op, val, tp, uaddr2, val2, val3);
+}
+
+#define FUTEXV_WAITER_MASK (FUTEX_32 | FUTEX_PRIVATE_FLAG)
+
+static int futex_parse_waitv(struct futex_vector *futexv,
+			     struct futex_waitv __user *uwaitv,
+			     unsigned int nr_futexes)
+{
+	struct futex_waitv aux;
+	unsigned int i;
+
+	for (i = 0; i < nr_futexes; i++) {
+		if (copy_from_user(&aux, &uwaitv[i], sizeof(aux)))
+			return -EFAULT;
+
+		if ((aux.flags & ~FUTEXV_WAITER_MASK) || aux.__reserved)
+			return -EINVAL;
+		if (!(aux.flags & FUTEX_32))
+			return -EINVAL;
+
+		futexv[i].w.flags = aux.flags;
+		futexv[i].w.val = aux.val;
+		futexv[i].w.uaddr = aux.uaddr;
+		futexv[i].q = futex_q_init;
+	}
+
+	return 0;
+}
+
+SYSCALL_DEFINE5(futex_waitv, struct futex_waitv __user *, waiters,
+		unsigned int, nr_futexes, unsigned int, flags,
+		struct __kernel_timespec __user *, timeout, clockid_t, clockid)
+{
+	struct hrtimer_sleeper to;
+	struct futex_vector *futexv;
+	struct timespec64 ts;
+	ktime_t time;
+	int timer_flags = 0;
+	int ret;
+
+	if (flags)
+		return -EINVAL;
+	if (!nr_futexes || nr_futexes > FUTEX_WAITV_MAX || !waiters)
+		return -EINVAL;
+
+	if (timeout) {
+		if (clockid == CLOCK_REALTIME)
+			timer_flags = FLAGS_CLOCKRT;
+		else if (clockid != CLOCK_MONOTONIC)
+			return -EINVAL;
+
+		if (get_timespec64(&ts, timeout))
+			return -EFAULT;
+		if (!timespec64_valid(&ts))
+			return -EINVAL;
+
+		time = timespec64_to_ktime(ts);
+		futex_setup_timer(&time, &to, timer_flags, 0);
+	}
+
+	futexv = kcalloc(nr_futexes, sizeof(*futexv), GFP_KERNEL);
+	if (!futexv) {
+		ret = -ENOMEM;
+		goto destroy_timer;
+	}
+
+	ret = futex_parse_waitv(futexv, waiters, nr_futexes);
+	if (!ret)
+		ret = futex_wait_multiple(futexv, nr_futexes,
+					  timeout ? &to : NULL);
+
+	kfree(futexv);
+
+destroy_timer:
+	if (timeout) {
+		hrtimer_cancel(&to.timer);
+		destroy_hrtimer_on_stack(&to.timer);
+	}
+
+	return ret;
 }
 
 #ifdef CONFIG_COMPAT

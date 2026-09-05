@@ -360,6 +360,8 @@ struct fts_ts_info {
 	struct notifier_block notifier;
 	struct notifier_block bl_notifier;
 	bool sensor_sleep;
+	/* Only a successfully completed power transition may be deduplicated. */
+	bool power_state_valid;
 	bool sensor_scan;
 	struct pinctrl *ts_pinctrl;
 	struct pinctrl_state *pinctrl_state_active;
@@ -421,6 +423,7 @@ struct fts_ts_info {
 	short strength_buf[PAGE_SIZE];
 	struct tp_frame thp_frame;
 	int aod_status;
+	bool aod_status_from_display;
 	bool tp_pm_suspend;
 	struct completion pm_resume_completion;
 	bool gamemode_enable;

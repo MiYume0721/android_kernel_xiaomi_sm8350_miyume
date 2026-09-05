@@ -146,6 +146,17 @@ static inline kernel_cap_t cap_invert(const kernel_cap_t c)
 	return dest;
 }
 
+static inline bool cap_isidentical(const kernel_cap_t a, const kernel_cap_t b)
+{
+	unsigned int i;
+
+	CAP_FOR_EACH_U32(i) {
+		if (a.cap[i] != b.cap[i])
+			return false;
+	}
+	return true;
+}
+
 static inline bool cap_isclear(const kernel_cap_t a)
 {
 	unsigned __capi;
