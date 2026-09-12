@@ -1,6 +1,6 @@
-## Xiaomi SM8350 Device MiYume HyperOSKernel ##
+## Xiaomi SM8350 Device MiYume HoshinoNeko Kernel ##
 
-基于上游 https://github.com/hushangda/android_kernel_xiaomi_sm8350_venus
+基于 https://github.com/hushangda/android_kernel_xiaomi_sm8350_venus
 
 ## 支持设备 ##
 - Xiaomi 11 (venus)
@@ -8,21 +8,21 @@
 - Xiaomi 11 Ultra (star)
 
 ## 内核特性 ##
-- 内核版本：5.4.302
-- 集成 ReSukiSU 4.1.2 + SuSFS
+- 版本：5.4.302
+- ReSukiSU v4.2.0-rc1 + SuSFS v2.1.0
 - Backport BPF (Kernel5.10)
-- 启用 LTO (ThinLTO) 优化
-- 测试 Android 13 含更高正常
+- 启用 LTO (ThinLTO)
+- 启用 f2fs 文件系统优化
+- 支持 HyperOS 4.0 Android 17
+- 测试 Miui Android 13 及更高正常
 
 ## 需要注意 ##
+- 低于 Android 15 开机会供应商报错
 - **Venus** 使用 `venus_defconfig`
 - **Star/Mars** 使用 `star_defconfig`
 
 ## 工具配置 ##
 - Clang 18.1.8 & LLD 18.1.8
 
-## 配置内核 ##
-make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out xxx_defconfig
-
-## 编译内核 ##
-make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out modules Image
+## 开始编译 ##
+bash build_device.sh (填设备代号, 不填默认venus)
