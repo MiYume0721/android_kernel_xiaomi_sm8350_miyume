@@ -64,7 +64,7 @@
 #include <linux/compat.h>
 #include <linux/vmalloc.h>
 #include <linux/hwui_mon.h>
-#ifdef CONFIG_KSU_SUSFS
+#if defined(CONFIG_KSU_SUSFS) && !defined(CONFIG_KSU_MANUAL_HOOK)
 #include <linux/susfs_def.h>
 #endif
 

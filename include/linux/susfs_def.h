@@ -62,6 +62,14 @@
  // thread_info->flags is unsigned long :D
 #define TIF_PROC_UMOUNTED 33
 
+/* ReSukiSU's SUSFS hook uses the same per-task privilege marker that the
+ * legacy manual hook used. Keep it outside the architecture-defined flags. */
+#ifdef CONFIG_64BIT
+#define TIF_PROC_NO_SU 62
+#else
+#define TIF_PROC_NO_SU 30
+#endif
+
 #define AS_FLAGS_SUS_PATH 33
 #define AS_FLAGS_SUS_MOUNT 34
 #define AS_FLAGS_SUS_KSTAT 35
@@ -142,8 +150,26 @@ static inline bool susfs_is_current_proc_umounted(void) {
 	return (likely(test_thread_flag(TIF_PROC_UMOUNTED)));
 }
 
+static inline bool susfs_is_current_proc_no_su(void) {
+	return (likely(test_thread_flag(TIF_PROC_NO_SU)));
+}
+
+static inline void susfs_set_current_proc_no_su(void) {
+	set_thread_flag(TIF_PROC_NO_SU);
+}
+
+static inline void susfs_clear_current_proc_no_su(void) {
+	clear_thread_flag(TIF_PROC_NO_SU);
+}
+
 static inline void susfs_set_current_proc_umounted(void) {
 	set_thread_flag(TIF_PROC_UMOUNTED);
+}
+
+/* ReSukiSU calls this when the next zygote transition needs the SUSFS
+ * unmount marker; on this 5.4 implementation that marker is the same flag. */
+static inline void susfs_set_current_proc_umounted_for_zygote_next(void) {
+	susfs_set_current_proc_umounted();
 }
 
 static inline bool susfs_is_current_proc_umounted_app(void) {
