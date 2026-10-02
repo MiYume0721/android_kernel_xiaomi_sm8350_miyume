@@ -152,5 +152,4 @@ arch/*/configs/vendor/*_defconfig
 # vendor device tree directories
 arch/arm64/boot/dts/vendor
 arch/arm/boot/dts/vendor
-
-out-star-5.4.302-kpm
+out*

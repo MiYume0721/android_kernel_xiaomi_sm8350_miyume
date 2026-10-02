@@ -10,7 +10,7 @@ cd "$workdir"
 echo "构建设备: $device"
 
 # 配置内核
-make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out ${device}_defconfig
+make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${device} ${device}_defconfig
 
 # 编译内核
-make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out modules Image
+make -j$(nproc --all) ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out_${device} modules Image
