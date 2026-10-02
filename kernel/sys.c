@@ -50,6 +50,8 @@
 #include <linux/kprobes.h>
 #include <linux/user_namespace.h>
 #include <linux/binfmts.h>
+#include <linux/close_range.h>
+#include <linux/fdtable.h>
 
 #include <linux/sched.h>
 #include <linux/sched/autogroup.h>
@@ -2447,6 +2449,16 @@ static int prctl_set_vma(unsigned long opt, unsigned long start,
 	return -EINVAL;
 }
 #endif
+
+/*
+ * See close_range(2) for more information and return values.
+ * Backported from mainline v5.9 (278a5fbaed89).
+ */
+SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
+		unsigned int, flags)
+{
+	return __close_range(fd, max_fd, flags);
+}
 
 SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		unsigned long, arg4, unsigned long, arg5)

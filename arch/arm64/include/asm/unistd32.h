@@ -879,8 +879,15 @@ __SYSCALL(__NR_fspick, sys_fspick)
 __SYSCALL(__NR_pidfd_open, sys_pidfd_open)
 #define __NR_clone3 435
 __SYSCALL(__NR_clone3, sys_clone3)
-#define __NR_process_madvise 436
-__SYSCALL(__NR_process_madvise, sys_process_madvise)
+/* mainline uapi number 436, hardcoded in userspace bionic (Android 17) */
+#define __NR_close_range 436
+__SYSCALL(__NR_close_range, sys_close_range)
+/*
+ * The vendor process_madvise backport (non-mainline ABI) used to sit at 436;
+ * left out of the table to keep the mainline close_range number intact.
+ */
+/* #define __NR_process_madvise 436
+   __SYSCALL(__NR_process_madvise, sys_process_madvise) */
 
 /*
  * Please add new compat syscalls above this comment and update
