@@ -13,6 +13,7 @@
 #include <video/mipi_display.h>
 
 #include "dsi_panel.h"
+#include "dsi_display.h"
 #include "dsi_ctrl_hw.h"
 #include "dsi_parser.h"
 #include "sde_dbg.h"
@@ -3743,6 +3744,108 @@ static void dsi_panel_setup_vm_ops(struct dsi_panel *panel, bool trusted_vm_env)
 	}
 }
 
+/*
+ * FOD HBM / FOD UI interface used by the ROM's UDFPS handler
+ * (libudfpshandler.so).  The HBM request is only latched here; it is applied at
+ * pre-kickoff by mi_sde_connector_fod_hbm_fence() so the panel command lands in
+ * a commit.
+ */
+void dsi_panel_request_fod_hbm(struct dsi_panel *panel, bool status)
+{
+	if (!panel)
+		return;
+
+	mutex_lock(&panel->panel_lock);
+	panel->fod_hbm_requested = status;
+	panel->fod_hbm_sysfs_used = true;
+	mutex_unlock(&panel->panel_lock);
+}
+
+static ssize_t sysfs_fod_hbm_write(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	struct dsi_display *display = dev_get_drvdata(dev);
+	bool status;
+	int rc;
+
+	if (!display || !display->panel) {
+		DSI_ERR("Invalid display\n");
+		return -EINVAL;
+	}
+
+	rc = kstrtobool(buf, &status);
+	if (rc) {
+		DSI_ERR("%s: kstrtobool failed. rc=%d\n", __func__, rc);
+		return rc;
+	}
+
+	dsi_panel_request_fod_hbm(display->panel, status);
+	DSI_INFO("%s: fod_hbm requested %d\n", __func__, status);
+
+	return count;
+}
+
+static ssize_t sysfs_fod_ui_read(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct dsi_display *display = dev_get_drvdata(dev);
+	bool status;
+
+	if (!display || !display->panel) {
+		DSI_ERR("Invalid display\n");
+		return -EINVAL;
+	}
+
+	mutex_lock(&display->panel->panel_lock);
+	status = display->panel->fod_ui;
+	mutex_unlock(&display->panel->panel_lock);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", status);
+}
+
+static DEVICE_ATTR(fod_hbm, 0220, NULL, sysfs_fod_hbm_write);
+static DEVICE_ATTR(fod_ui, 0440, sysfs_fod_ui_read, NULL);
+
+static struct attribute *dsi_panel_fod_attrs[] = {
+	&dev_attr_fod_hbm.attr,
+	&dev_attr_fod_ui.attr,
+	NULL,
+};
+
+static struct attribute_group dsi_panel_fod_attr_group = {
+	.attrs = dsi_panel_fod_attrs,
+};
+
+void dsi_panel_set_fod_ui(struct dsi_panel *panel, bool status)
+{
+	if (!panel)
+		return;
+
+	mutex_lock(&panel->panel_lock);
+	panel->fod_ui = status;
+	mutex_unlock(&panel->panel_lock);
+
+	if (panel->parent)
+		sysfs_notify(&panel->parent->kobj, NULL, "fod_ui");
+}
+
+static int dsi_panel_fod_sysfs_init(struct dsi_panel *panel)
+{
+	int rc;
+
+	if (!panel->parent) {
+		DSI_ERR("no parent device for FOD sysfs\n");
+		return -ENODEV;
+	}
+
+	rc = sysfs_create_group(&panel->parent->kobj, &dsi_panel_fod_attr_group);
+	if (rc)
+		DSI_ERR("failed to create FOD sysfs attributes, rc=%d\n", rc);
+
+	return rc;
+}
+
 struct dsi_panel *dsi_panel_get(struct device *parent,
 				struct device_node *of_node,
 				struct device_node *parser_node,
@@ -3882,6 +3985,8 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
 	mutex_init(&panel->panel_lock);
 
 	mi_dsi_panel_init(panel);
+
+	dsi_panel_fod_sysfs_init(panel);
 
 	return panel;
 error_vreg_put:
