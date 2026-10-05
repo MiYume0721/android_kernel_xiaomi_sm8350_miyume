@@ -558,6 +558,31 @@ int mi_sde_connector_fod_hbm_fence(struct drm_connector *connector)
 		}
 	}
 #endif
+	/*
+	 * Apply the FOD HBM request latched by the fod_hbm sysfs attribute, once
+	 * per state change, at pre-kickoff so the panel command lands in this
+	 * commit.  Only active after userspace has used the attribute, so
+	 * kernels driven entirely through the touch path are unaffected.
+	 */
+	if (dsi_display->panel->fod_hbm_sysfs_used &&
+			mi_cfg->fod_hbm_layer_enabled != dsi_display->panel->fod_hbm_requested &&
+			c_conn->allow_bl_update) {
+		if (dsi_display->panel->fod_hbm_requested) {
+			if (mi_cfg->delay_before_fod_hbm_on)
+				sde_encoder_wait_for_event(c_conn->encoder, MSM_ENC_VBLANK);
+			mi_sde_connector_panel_ctl(connector, MI_FOD_HBM_ON, false);
+			mi_cfg->fod_hbm_layer_enabled = true;
+			DISP_INFO("fod_hbm on\n");
+		} else {
+			if (mi_cfg->delay_before_fod_hbm_off)
+				sde_encoder_wait_for_event(c_conn->encoder, MSM_ENC_VBLANK);
+			mi_sde_connector_panel_ctl(connector, MI_FOD_HBM_OFF, false);
+			mi_cfg->fod_hbm_layer_enabled = false;
+			dsi_panel_set_fod_ui(dsi_display->panel, false);
+			DISP_INFO("fod_hbm off\n");
+		}
+	}
+
 	return rc;
 }
 

@@ -217,6 +217,10 @@ struct dsi_panel {
 	struct mipi_dsi_host *host;
 	struct device *parent;
 
+	bool fod_ui;
+	bool fod_hbm_requested;
+	bool fod_hbm_sysfs_used;
+
 	struct dsi_host_common_cfg host_config;
 	struct dsi_video_engine_cfg video_config;
 	struct dsi_cmd_engine_cfg cmd_config;
@@ -298,6 +302,9 @@ static inline bool dsi_panel_is_type_oled(struct dsi_panel *panel)
 {
 	return (panel->panel_type == DSI_DISPLAY_PANEL_TYPE_OLED);
 }
+
+void dsi_panel_request_fod_hbm(struct dsi_panel *panel, bool status);
+void dsi_panel_set_fod_ui(struct dsi_panel *panel, bool status);
 
 struct dsi_panel *dsi_panel_get(struct device *parent,
 				struct device_node *of_node,
