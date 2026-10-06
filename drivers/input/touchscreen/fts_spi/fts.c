@@ -8727,7 +8727,10 @@ static int fts_probe(struct spi_device *client)
 	info->fod_status = 1;
 	mutex_unlock(&info->fod_mutex);
 #else
-	info->fod_status = -1;
+	/* fts_need_enter_lp_mode() only asks the panel firmware to report
+	 * FOD presses in low-power mode when fod_status != -1, so the vendor
+	 * default of -1 leaves screen-off unlock dead. */
+	info->fod_status = 1;
 #endif
 	info->fod_icon_status = 1;
 	error =

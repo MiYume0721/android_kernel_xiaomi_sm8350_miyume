@@ -1351,6 +1351,19 @@ int dsi_conn_post_kickoff(struct drm_connector *connector,
 			dsi_ctrl_setup_avr(display->ctrl[i].ctrl, enable);
 	}
 
+	/*
+	 * Publish FOD HBM readiness on the fod_ui sysfs attribute.  The ROM's
+	 * UDFPS handler polls it and captures the fingerprint image only once
+	 * the frame carrying the FOD HBM brightness is on screen.
+	 */
+	if (display && display->panel && display->panel->fod_hbm_sysfs_used &&
+			display->panel->mi_cfg.fod_hbm_layer_enabled &&
+			!display->panel->fod_ui) {
+		sde_encoder_wait_for_event(encoder, MSM_ENC_TX_COMPLETE);
+		sde_encoder_wait_for_event(encoder, MSM_ENC_VBLANK);
+		dsi_panel_set_fod_ui(display->panel, true);
+	}
+
 	return 0;
 }
 
