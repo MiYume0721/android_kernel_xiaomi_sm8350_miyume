@@ -850,24 +850,8 @@ __SYSCALL(__NR_pidfd_open, sys_pidfd_open)
 #define __NR_clone3 435
 __SYSCALL(__NR_clone3, sys_clone3)
 #endif
-
-/*
- * close_range (mainline v5.9, commit 278a5fbaed89) with CLOSE_RANGE_CLOEXEC
- * (mainline v5.11, commit 6099733a459d).
- * The number 436 matches the mainline uapi, which userspace (bionic
- * POSIX_SPAWN_CLOEXEC_DEFAULT, Android 17 netd) hardcodes.
- */
-#define __NR_close_range 436
-__SYSCALL(__NR_close_range, sys_close_range)
-
-/*
- * The vendor process_madvise backport (non-mainline which/upid ABI) used to
- * sit at 436 here, conflicting with the mainline close_range number that
- * userspace expects. It is left out of the syscall table; do not re-add it
- * below 440 unless using a mainline-ABI implementation.
- */
-/* #define __NR_process_madvise 436
-   __SYSCALL(__NR_process_madvise, sys_process_madvise) */
+#define __NR_process_madvise 436
+__SYSCALL(__NR_process_madvise, sys_process_madvise)
 
 #undef __NR_syscalls
 #define __NR_syscalls 437

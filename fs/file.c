@@ -15,7 +15,6 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
-#include <linux/close_range.h>
 #include <linux/bitops.h>
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
@@ -656,81 +655,6 @@ out_unlock:
 	return -EBADF;
 }
 EXPORT_SYMBOL(__close_fd); /* for ksys_close() */
-
-static inline void __range_cloexec(struct files_struct *files,
-				   unsigned int fd, unsigned int max_fd)
-{
-	struct fdtable *fdt;
-
-	/* make sure we're using the correct max value */
-	spin_lock(&files->file_lock);
-	fdt = files_fdtable(files);
-	max_fd = min(max_fd, fdt->max_fds - 1);
-	while (fd <= max_fd) {
-		if (fdt->fd[fd])
-			__set_close_on_exec(fd, fdt);
-		fd++;
-	}
-	spin_unlock(&files->file_lock);
-}
-
-/*
- * See close_range(2) for more information and return values.
- * Backported from mainline v5.9 (278a5fbaed89) and v5.11 (6099733a459d).
- */
-int __close_range(unsigned fd, unsigned max_fd, unsigned int flags)
-{
-	struct task_struct *me = current;
-	struct files_struct *cur_fds = me->files, *fds = NULL;
-
-	if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))
-		return -EINVAL;
-
-	if (fd > max_fd)
-		return -EINVAL;
-
-	if ((flags & CLOSE_RANGE_UNSHARE) && atomic_read(&cur_fds->count) > 1) {
-		int err;
-		struct files_struct *new_fds;
-
-		new_fds = dup_fd(cur_fds, &err);
-		if (!new_fds)
-			return err ?: -ENOMEM;
-		fds = cur_fds;
-		cur_fds = new_fds;
-	}
-
-	if (flags & CLOSE_RANGE_CLOEXEC) {
-		__range_cloexec(cur_fds, fd, max_fd);
-	} else {
-		struct fdtable *fdt;
-		unsigned int last;
-
-		spin_lock(&cur_fds->file_lock);
-		fdt = files_fdtable(cur_fds);
-		last = min(max_fd, fdt->max_fds - 1);
-		spin_unlock(&cur_fds->file_lock);
-
-		for (; fd <= last; fd++)
-			__close_fd(cur_fds, fd);
-	}
-
-	if (fds) {
-		/*
-		 * We dropped the files struct between tasks...
-		 */
-		task_lock(me);
-		me->files = cur_fds;
-		task_unlock(me);
-
-		/*
-		 * ... and put the old files struct back.
-		 */
-		put_files_struct(fds);
-	}
-
-	return 0;
-}
 
 /*
  * variant of __close_fd that gets a ref on the file for later fput
