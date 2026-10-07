@@ -4023,10 +4023,6 @@ union bpf_attr {
 enum bpf_func_id {
 	__BPF_FUNC_MAPPER(__BPF_ENUM_FN)
 	__BPF_FUNC_MAX_ID,
-	/*
-	 * Keep the numeric ABI for vendor VoIP callback.
-	 */
-	BPF_SOCK_OPS_VOIP_CB = BPF_SOCK_OPS_PARSE_HDR_OPT_CB,
 };
 #undef __BPF_ENUM_FN
 
@@ -4867,6 +4863,10 @@ enum {
 					 * by the kernel or the
 					 * earlier bpf-progs.
 					 */
+	/*
+	 * Keep the numeric ABI for vendor VoIP callback.
+	 */
+	BPF_SOCK_OPS_VOIP_CB = BPF_SOCK_OPS_PARSE_HDR_OPT_CB,
 };
 
 /* List of TCP states. There is a build check in net/ipv4/tcp.c to detect
