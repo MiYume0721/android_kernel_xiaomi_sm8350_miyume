@@ -24,6 +24,9 @@
 #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
 #include <linux/susfs_def.h>
 #endif
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+#include <linux/srcu.h>
+#endif
 
 #include <asm/elf.h>
 #include <asm/tlb.h>
@@ -357,10 +360,11 @@ extern void susfs_sus_kstat_spoof_show_map_vma(struct inode *inode,
 					       unsigned long *out_ino);
 #endif
 #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-extern int susfs_open_redirect_spoof_show_map_vma(struct inode *inode,
-						  unsigned long *out_ino,
-						  dev_t *out_dev,
-						  char *spoofed_name);
+extern struct srcu_struct susfs_srcu_open_redirect;
+extern int susfs_open_redirect_spoof_show_map_vma_srcu(struct inode *inode,
+						       unsigned long *out_ino,
+						       dev_t *out_dev,
+						       char **out_spoofed_name);
 #endif
 
 static void
@@ -374,20 +378,27 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 	unsigned long start, end;
 	dev_t dev = 0;
 	const char *name = NULL;
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-	char *spoofed_redirected_name = NULL;
-#endif
 
 	if (file) {
 		struct inode *inode = file_inode(vma->vm_file);
 #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 		if (SUSFS_IS_INODE_OPEN_REDIRECT(inode)) {
-			if (!susfs_open_redirect_spoof_show_map_vma(inode, &ino,
-								    &dev,
-								    spoofed_redirected_name)) {
+			char *spoofed_redirected_name = NULL;
+			int srcu_idx = srcu_read_lock(&susfs_srcu_open_redirect);
+			int ret = susfs_open_redirect_spoof_show_map_vma_srcu(inode, &ino, &dev, &spoofed_redirected_name);
+			if (!ret) {
 				pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
-				goto orig_flow;
+				start = vma->vm_start;
+				end = vma->vm_end;
+				show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
+				seq_pad(m, ' ');
+				if (spoofed_redirected_name)
+					seq_puts(m, spoofed_redirected_name);
+				seq_putc(m, '\n');
+				srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
+				return;
 			}
+			srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
 		}
 #endif
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
@@ -416,26 +427,9 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 #endif
 	}
 
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-orig_flow:
-#endif
 	start = vma->vm_start;
 	end = vma->vm_end;
 	show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
-
-	/*
-	 * Print the dentry name for named mappings, and a
-	 * special [heap] marker for the heap:
-	 */
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-	if (spoofed_redirected_name) {
-		seq_pad(m, ' ');
-		seq_puts(m, spoofed_redirected_name);
-		seq_putc(m, '\n');
-		kfree(spoofed_redirected_name);
-		return;
-	}
-#endif
 
 	if (file) {
 		seq_pad(m, ' ');
