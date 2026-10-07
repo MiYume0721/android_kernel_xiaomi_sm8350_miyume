@@ -108,8 +108,46 @@ jobs:
         run: |
           DEVICE="${{ matrix.device }}"
           git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-          sed -i "s/device.name1=.*/device.name1=$DEVICE/g" AnyKernel3/anykernel.sh
-          
+          rm -rf AnyKernel3/anykernel.sh AnyKernel3/README.md AnyKernel3/.git*
+
+          cat << 'EOF' > AnyKernel3/anykernel.sh
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          ### AnyKernel setup
+          # global properties
+          properties() { '
+          kernel.string=MiYume Kernel for Xiaomi SM8350
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=venus
+          device.name2=star
+          device.name3=haydn
+          device.name4=
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; } # end properties
+
+          # boot shell variables
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh;
+
+          # boot install
+          split_boot;
+          flash_boot;
+          ## end boot install
+          EOF
+
           IMAGE_PATH="out_${DEVICE}/arch/arm64/boot/Image"
           if [ -f "$IMAGE_PATH" ]; then
             cp "$IMAGE_PATH" AnyKernel3/Image

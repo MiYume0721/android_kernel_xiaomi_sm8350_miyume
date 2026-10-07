@@ -1270,10 +1270,7 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 	 * else: globally changing UTS_RELEASE would also change module vermagic
 	 * and userspace feature selection unrelated to BPF.
 	 */
-	if (!strcmp(current->comm, "netbpfload") ||
-	    !strcmp(current->comm, "bpfloader") ||
-	    !strncmp(current->comm, "netd", 4) ||
-	    !strncmp(current->comm, "uprobestats", 11)) {
+	if (!strcmp(current->comm, "netbpfload")) {
 		strscpy(tmp.release, "5.15.136-dsu-bpf-compat",
 			sizeof(tmp.release));
 	}
