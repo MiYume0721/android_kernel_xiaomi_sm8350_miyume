@@ -46,7 +46,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev python3 \
-            dwarves zip curl git lld-18 llvm-18 clang-18 binutils-aarch64-linux-gnu
+            dwarves zip curl git ccache lld-18 llvm-18 clang-18 binutils-aarch64-linux-gnu
           sudo ln -sf /usr/bin/clang-18 /usr/bin/clang
           sudo ln -sf /usr/bin/ld.lld-18 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-ar-18 /usr/bin/llvm-ar
@@ -56,16 +56,53 @@ jobs:
           sudo ln -sf /usr/bin/llvm-readelf-18 /usr/bin/llvm-readelf
           sudo ln -sf /usr/bin/llvm-strip-18 /usr/bin/llvm-strip
 
-      - name: Verify Clang Version
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ matrix.device }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.device }}-
+            ccache-
+
+      - name: Configure ccache & Toolchain Wrappers
+        run: |
+          mkdir -p ~/.cache/ccache
+          mkdir -p ~/.ccache_bin
+          ccache --set-config=max_size=5G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache --set-config=sloppiness=time_macros,include_file_mtime,file_macro
+          
+          # Create compiler wrappers so clang transparently uses ccache
+          cat << 'EOF' > ~/.ccache_bin/clang
+          #!/bin/bash
+          exec ccache /usr/bin/clang-18 "$@"
+          EOF
+          cat << 'EOF' > ~/.ccache_bin/clang++
+          #!/bin/bash
+          exec ccache /usr/bin/clang++-18 "$@"
+          EOF
+          chmod +x ~/.ccache_bin/*
+          echo "$HOME/.ccache_bin" >> $GITHUB_PATH
+
+      - name: Verify Toolchain & Initial Cache
         run: |
           clang --version
           ld.lld --version
+          ccache -s
+          ccache -z
 
       - name: Build Kernel Image
         run: |
           DEVICE="${{ matrix.device }}"
-          echo "=== Building Kernel for $DEVICE ==="
+          echo "=== Building Kernel for $DEVICE with incremental ccache ==="
           bash build_device.sh "$DEVICE"
+
+      - name: Show ccache Statistics
+        if: always()
+        run: |
+          ccache -s
 
       - name: Package with AnyKernel3
         run: |
