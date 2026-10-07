@@ -39,7 +39,6 @@ static int seq_show(struct seq_file *m, void *v)
 	struct mount *mnt = NULL;
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
-
 	task = get_proc_task(m->private);
 	if (!task)
 		return -ENOENT;
@@ -77,11 +76,7 @@ static int seq_show(struct seq_file *m, void *v)
 			int mnt_id = real_mount(file->f_path.mnt)->mnt_id;
 			unsigned long ino = inode->i_ino;
 			susfs_sus_kstat_spoof_proc_fd_seq_show(&mnt_id, &ino, inode->i_sb->s_dev);
-			seq_printf(m, "pos:	%lli
-flags:	0%o
-mnt_id:	%i
-ino:	%lu
-",
+			seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\nino:\t%lu\n",
 					(long long)file->f_pos, f_flags,
 					mnt_id,
 					ino);
@@ -128,19 +123,7 @@ out_kfree:
 	}
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-	if (SUSFS_IS_INODE_OPEN_REDIRECT(file_inode(file))) {
-		if (susfs_open_redirect_spoof_seq_show(file_inode(file), &mnt_id, &ino))
-			goto orig_flow;
-		seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\nino:\t%lu\n",
-				(long long)file->f_pos, f_flags,
-				mnt_id,
-				ino);
-		goto bypass_orig_flow;
-	}
-#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-
-#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
+#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)
 orig_flow:
 	seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\nino:\t%lu\n",
 			(long long)file->f_pos, f_flags,
@@ -151,8 +134,8 @@ bypass_orig_flow:
 	seq_printf(m, "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\n",
 		   (long long)file->f_pos, f_flags,
 		   real_mount(file->f_path.mnt)->mnt_id);
-
 #endif // #if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)
+
 	show_fd_locks(m, file, files);
 	if (seq_has_overflowed(m))
 		goto out;
