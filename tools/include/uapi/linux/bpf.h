@@ -4668,6 +4668,10 @@ struct bpf_sock_ops {
 	__u64 bytes_received;
 	__u64 bytes_acked;
 	__bpf_md_ptr(struct bpf_sock *, sk);
+	/* Xiaomi vendor ABI: keep these directly after sk. */
+	__u32 sk_uid;
+	__u32 voip_daddr;
+	__u32 voip_dport;
 	/* [skb_data, skb_data_end) covers the whole TCP header.
 	 *
 	 * BPF_SOCK_OPS_PARSE_HDR_OPT_CB: The packet received
