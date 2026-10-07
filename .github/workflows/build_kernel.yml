@@ -1,0 +1,98 @@
+name: Build Xiaomi SM8350 Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Target Device'
+        required: true
+        default: 'venus'
+        type: choice
+        options:
+          - venus
+          - star
+          - haydn
+          - all
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'Documentation/**'
+
+jobs:
+  build:
+    name: Build Kernel for ${{ matrix.device }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.device == 'all' && fromJSON('["venus", "star", "haydn"]') || fromJSON(format('["{0}"]', github.event.inputs.device))) || fromJSON('["venus"]') }}
+
+    steps:
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev python3 \
+            dwarves zip curl git lld-18 llvm-18 clang-18 binutils-aarch64-linux-gnu
+          sudo ln -sf /usr/bin/clang-18 /usr/bin/clang
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/bin/ld.lld
+          sudo ln -sf /usr/bin/llvm-ar-18 /usr/bin/llvm-ar
+          sudo ln -sf /usr/bin/llvm-nm-18 /usr/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-objcopy-18 /usr/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-objdump-18 /usr/bin/llvm-objdump
+          sudo ln -sf /usr/bin/llvm-readelf-18 /usr/bin/llvm-readelf
+          sudo ln -sf /usr/bin/llvm-strip-18 /usr/bin/llvm-strip
+
+      - name: Verify Clang Version
+        run: |
+          clang --version
+          ld.lld --version
+
+      - name: Build Kernel Image
+        run: |
+          DEVICE="${{ matrix.device }}"
+          echo "=== Building Kernel for $DEVICE ==="
+          bash build_device.sh "$DEVICE"
+
+      - name: Package with AnyKernel3
+        run: |
+          DEVICE="${{ matrix.device }}"
+          git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          sed -i "s/device.name1=.*/device.name1=$DEVICE/g" AnyKernel3/anykernel.sh
+          
+          IMAGE_PATH="out_${DEVICE}/arch/arm64/boot/Image"
+          if [ -f "$IMAGE_PATH" ]; then
+            cp "$IMAGE_PATH" AnyKernel3/Image
+            cd AnyKernel3
+            zip -r9 "../AnyKernel3-MiYume-${DEVICE}-${{ github.run_number }}.zip" * -x .git README.md *placeholder
+            cd ..
+            echo "Package built successfully!"
+          else
+            echo "ERROR: Kernel Image not found at $IMAGE_PATH"
+            exit 1
+          fi
+
+      - name: Upload Kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-Image-${{ matrix.device }}-${{ github.run_number }}
+          path: out_${{ matrix.device }}/arch/arm64/boot/Image
+
+      - name: Upload AnyKernel3 Flashable Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-MiYume-${{ matrix.device }}-${{ github.run_number }}
+          path: AnyKernel3-MiYume-${{ matrix.device }}-*.zip

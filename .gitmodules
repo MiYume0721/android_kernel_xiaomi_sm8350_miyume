@@ -1,4 +1,4 @@
 [submodule "KernelSU"]
 	path = KernelSU
-	url = https://github.com/ReSukiSU/ReSukiSU.git
+	url = https://github.com/Baka-SU/BakaSU.git
 	branch = main
