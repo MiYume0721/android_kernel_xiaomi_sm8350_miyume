@@ -86,6 +86,14 @@ jobs:
           chmod +x ~/.ccache_bin/*
           echo "$HOME/.ccache_bin" >> $GITHUB_PATH
 
+      - name: Ensure BakaSU 5.4 Compatibility
+        run: |
+          if [ -d "KernelSU" ] && [ -f "patches/bakasu_5.4_compat.patch" ]; then
+            cd KernelSU
+            git apply --check ../patches/bakasu_5.4_compat.patch 2>/dev/null && git apply ../patches/bakasu_5.4_compat.patch && echo "Applied 5.4 compatibility patch to KernelSU" || echo "KernelSU already has compatibility patch applied"
+            cd ..
+          fi
+
       - name: Verify Toolchain & Initial Cache
         run: |
           clang --version
