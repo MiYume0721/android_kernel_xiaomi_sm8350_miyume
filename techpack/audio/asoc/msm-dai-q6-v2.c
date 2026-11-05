@@ -7182,17 +7182,27 @@ static int msm_dai_q6_mi2s_dev_probe(struct platform_device *pdev)
 	rc = of_property_read_u32(pdev->dev.of_node, "qcom,msm-mi2s-rx-lines",
 				  &rx_line);
 	if (rc) {
-		dev_err(&pdev->dev, "%s: Rx line from DT file %s\n", __func__,
-			"qcom,msm-mi2s-rx-lines");
-		goto free_pdata;
+		/* AOSP-style device trees carry a single bitmask for both directions. */
+		rc = of_property_read_u32(pdev->dev.of_node,
+					  "qcom,msm-mi2s-lines", &rx_line);
+		if (rc) {
+			dev_err(&pdev->dev, "%s: Rx line from DT file %s\n",
+				__func__, "qcom,msm-mi2s-rx-lines");
+			goto free_pdata;
+		}
 	}
 
 	rc = of_property_read_u32(pdev->dev.of_node, "qcom,msm-mi2s-tx-lines",
 				  &tx_line);
 	if (rc) {
-		dev_err(&pdev->dev, "%s: Tx line from DT file %s\n", __func__,
-			"qcom,msm-mi2s-tx-lines");
-		goto free_pdata;
+		/* AOSP-style device trees carry a single bitmask for both directions. */
+		rc = of_property_read_u32(pdev->dev.of_node,
+					  "qcom,msm-mi2s-lines", &tx_line);
+		if (rc) {
+			dev_err(&pdev->dev, "%s: Tx line from DT file %s\n",
+				__func__, "qcom,msm-mi2s-tx-lines");
+			goto free_pdata;
+		}
 	}
 	dev_dbg(&pdev->dev, "dev name %s Rx line 0x%x , Tx ine 0x%x\n",
 		dev_name(&pdev->dev), rx_line, tx_line);
